@@ -1,0 +1,431 @@
+import os
+import json
+import asyncio
+import time
+from typing import Optional
+
+import base64
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
+from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
+import websockets
+
+load_dotenv()
+
+app = FastAPI()
+
+PUBLIC_WSS_URL = "wss://voice.code-studio.eu/ws/twilio"
+
+SYSTEM_PROMPT = """
+You are Code Studio's phone assistant.
+Be concise, friendly, and professional.
+Primary goals: understand the caller, collect key details, and propose next steps (book a meeting or take a message).
+If the caller asks for services: mention web design, web development, ecommerce (Shopify/WordPress), automation, and AI agents.
+If they want a meeting: ask for name, company, email, preferred day/time, and topic.
+If something is unclear: ask one clarifying question.
+Do not invent addresses, phone numbers, or prices. If asked, say you can share details by email.
+""".strip()
+
+
+def log(tag: str, msg: str):
+    ts = time.strftime("%H:%M:%S")
+    print(f"[{ts}] {tag} {msg}", flush=True)
+
+
+@app.post("/incoming-call")
+async def incoming_call(request: Request):
+    vr = VoiceResponse()
+    vr.say("Hi, you reached Code Studio. How can I help?", voice="alice", language="en-US")
+
+    connect = Connect()
+    connect.append(Stream(url=PUBLIC_WSS_URL, track="inbound_track"))
+    vr.append(connect)
+
+    return Response(content=str(vr), media_type="application/xml")
+
+
+@app.websocket("/ws/twilio")
+async def twilio_media_stream(ws: WebSocket):
+    await ws.accept()
+
+    # Twilio timestamps (ms) to estimate utterance durations
+    twilio_first_ts: Optional[int] = None
+    twilio_last_ts: Optional[int] = None
+
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    if not OPENAI_API_KEY:
+        log("[fatal]", "OPENAI_API_KEY is missing. Check .env location + permissions.")
+        await ws.close(code=1011)
+        return
+
+    stream_sid: Optional[str] = None
+    call_sid: Optional[str] = None
+
+    openai_ws_url = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview"
+    openai_headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "OpenAI-Beta": "realtime=v1",
+    }
+
+    # Queue decouples Twilio receive from OpenAI send
+    audio_q: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=2000)
+
+    # Stats
+    twilio_frames = 0
+    twilio_last_mark = time.time()
+    openai_sends = 0
+    openai_send_last = time.time()
+
+    # ---- VAD / gating knobs (tune here) ----
+    MIN_UTTER_MS = 900  # ignore coughs / short noises
+    # g711 ulaw @ 8kHz is 8000 bytes/sec -> 100ms ≈ 800 bytes
+    MIN_COMMIT_BYTES = 800
+
+    log("[twilio]", "WebSocket connected")
+
+    try:
+        async with websockets.connect(
+            openai_ws_url,
+            additional_headers=openai_headers,
+            ping_interval=20,
+            ping_timeout=20,
+            close_timeout=5,
+            max_size=2**23,
+        ) as ows:
+            log("[openai]", "Realtime WebSocket connected")
+
+            # IMPORTANT CHANGE:
+            # - create_response=False so random noises don't trigger a response
+            # - interrupt_response=True so barge-in feels natural
+            # - slightly stricter VAD reduces cough/noise triggers
+            session_update = {
+                "type": "session.update",
+                "session": {
+                    "instructions": SYSTEM_PROMPT,
+                    "modalities": ["audio", "text"],
+                    "voice": "alloy",
+                    "input_audio_format": "g711_ulaw",
+                    "output_audio_format": "g711_ulaw",
+                    "temperature": 0.6,
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.6,            # was 0.5 (less sensitive)
+                        "prefix_padding_ms": 250,    # was 200
+                        "silence_duration_ms": 600,  # was 400 (wait a bit more before "stopped")
+                        "create_response": False,    # <- YOU control when to respond
+                        "interrupt_response": True,  # <- allow barge-in
+                    },
+                    "input_audio_noise_reduction": {"type": "near_field"},
+                },
+            }
+
+            await ows.send(json.dumps(session_update))
+            log("[openai]", "Sent session.update")
+
+            # Track whether we've already committed/created a response for the current utterance
+            awaiting_turn = False
+
+            async def twilio_receiver():
+                nonlocal stream_sid, call_sid, twilio_frames, twilio_last_mark, twilio_first_ts, twilio_last_ts
+                try:
+                    while True:
+                        msg_text = await ws.receive_text()
+                        data = json.loads(msg_text)
+                        event = data.get("event")
+
+                        if event == "connected":
+                            log("[twilio]", "connected event")
+
+                        elif event == "start":
+                            start = data.get("start", {})
+                            stream_sid = start.get("streamSid") or data.get("streamSid")
+                            call_sid = start.get("callSid")
+                            log("[twilio]", f"start streamSid={stream_sid} callSid={call_sid}")
+
+                        elif event == "media":
+                            media = data.get("media", {})
+                            ts_raw = media.get("timestamp")
+
+                            ts = None
+                            if ts_raw is not None:
+                                try:
+                                    ts = int(ts_raw)
+                                except Exception:
+                                    ts = None
+
+                            if ts is not None:
+                                if twilio_first_ts is None:
+                                    twilio_first_ts = ts
+                                twilio_last_ts = ts
+
+                            b64 = media.get("payload")
+                            if not b64:
+                                continue
+
+                            twilio_frames += 1
+
+                            try:
+                                audio_q.put_nowait(b64)
+                            except asyncio.QueueFull:
+                                dropped = 0
+                                while not audio_q.empty() and dropped < 50:
+                                    try:
+                                        _ = audio_q.get_nowait()
+                                        audio_q.task_done()
+                                        dropped += 1
+                                    except Exception:
+                                        break
+                                log("[twilio][drop]", f"queue full, dropped={dropped}")
+                                try:
+                                    audio_q.put_nowait(b64)
+                                except Exception:
+                                    pass
+
+                            if twilio_frames % 50 == 0:
+                                log("[twilio]", f"frame={twilio_frames} media.timestamp(raw)={ts_raw} parsed={ts} qsize={audio_q.qsize()}")
+
+                            if twilio_frames % 200 == 0:
+                                now = time.time()
+                                dt = now - twilio_last_mark
+                                twilio_last_mark = now
+                                fps = 200.0 / dt if dt > 0 else 0.0
+                                log("[twilio]", f"rx 200 frames in {dt:.2f}s (~{fps:.1f} fps), qsize={audio_q.qsize()}")
+
+                        elif event == "stop":
+                            log("[twilio]", f"stop frames={twilio_frames} streamSid={stream_sid} callSid={call_sid}")
+                            try:
+                                await audio_q.put(None)
+                            except Exception:
+                                pass
+                            break
+
+                except WebSocketDisconnect:
+                    log("[twilio]", "client disconnected")
+                    try:
+                        await audio_q.put(None)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    log("[twilio][err]", repr(e))
+                    try:
+                        await audio_q.put(None)
+                    except Exception:
+                        pass
+
+            async def openai_sender():
+                """
+                Batch Twilio frames into ~160-200ms chunks and send to OpenAI.
+                Also performs an "idle commit" safely:
+                  - only if we have >=100ms buffered audio
+                  - and no new audio has arrived for IDLE_COMMIT_SEC
+                NOTE: With create_response=False, idle-commit will NOT cause speech unless we also response.create.
+                      It can still help OpenAI emit speech_stopped events on some setups.
+                """
+                nonlocal openai_sends, openai_send_last
+
+                batch_bytes = b""
+                frames_in_batch = 0
+                last_flush = time.time()
+                last_audio_time = time.time()
+
+                TARGET_FRAMES = 8      # ~160ms if Twilio frames are ~20ms
+                FLUSH_SEC = 0.20
+                IDLE_COMMIT_SEC = 1.0
+
+                while True:
+                    # Wake up periodically even with no audio, so we can idle-commit.
+                    try:
+                        b64 = await asyncio.wait_for(audio_q.get(), timeout=0.25)
+                    except asyncio.TimeoutError:
+                        # No new audio -> commit only if we have enough buffered audio
+                        if batch_bytes and (time.time() - last_audio_time) >= IDLE_COMMIT_SEC and len(batch_bytes) >= MIN_COMMIT_BYTES:
+                            try:
+                                out_b64 = base64.b64encode(batch_bytes).decode("ascii")
+                                await ows.send(json.dumps({"type": "input_audio_buffer.append", "audio": out_b64}))
+                                await ows.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                                log("[openai]", f"auto commit (idle) bytes={len(batch_bytes)}")
+                                batch_bytes = b""
+                                frames_in_batch = 0
+                                last_flush = time.time()
+                            except Exception as e:
+                                log("[openai][commit_err]", repr(e))
+                                return
+                        continue
+
+                    if b64 is None:
+                        audio_q.task_done()
+                        # Before exiting, flush remaining buffered audio (if enough)
+                        if len(batch_bytes) >= MIN_COMMIT_BYTES:
+                            try:
+                                out_b64 = base64.b64encode(batch_bytes).decode("ascii")
+                                await ows.send(json.dumps({"type": "input_audio_buffer.append", "audio": out_b64}))
+                                await ows.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                                log("[openai]", f"final commit on shutdown bytes={len(batch_bytes)}")
+                            except Exception:
+                                pass
+                        return
+
+                    # Decode audio
+                    try:
+                        chunk = base64.b64decode(b64)
+                    except Exception:
+                        audio_q.task_done()
+                        continue
+
+                    last_audio_time = time.time()
+
+                    batch_bytes += chunk
+                    frames_in_batch += 1
+                    audio_q.task_done()
+
+                    now = time.time()
+                    should_flush = (frames_in_batch >= TARGET_FRAMES) or ((now - last_flush) >= FLUSH_SEC)
+
+                    if should_flush and batch_bytes:
+                        out_b64 = base64.b64encode(batch_bytes).decode("ascii")
+                        payload = {"type": "input_audio_buffer.append", "audio": out_b64}
+
+                        t0 = time.time()
+                        try:
+                            await ows.send(json.dumps(payload))
+                        except Exception as e:
+                            log("[openai][send_err]", repr(e))
+                            return
+                        t1 = time.time()
+
+                        openai_sends += 1
+                        send_dt_ms = (t1 - t0) * 1000.0
+
+                        if openai_sends % 50 == 0:
+                            since = t1 - openai_send_last
+                            openai_send_last = t1
+                            log("[openai]", f"sent 50 appends in {since:.2f}s, last send={send_dt_ms:.1f}ms, qsize={audio_q.qsize()}")
+
+                        batch_bytes = b""
+                        frames_in_batch = 0
+                        last_flush = now
+
+            async def openai_receiver():
+                """
+                Receive OpenAI events and forward audio back to Twilio.
+
+                Key behavior:
+                  - create_response=False, so OpenAI will NOT speak unless we send response.create.
+                  - We gate tiny/noise utterances using MIN_UTTER_MS.
+                  - On too-short: clear the input buffer to avoid "commit_empty" later.
+                """
+                nonlocal twilio_first_ts, twilio_last_ts, awaiting_turn
+
+                sent_to_twilio = 0
+                ai_speaking = False
+
+                try:
+                    while True:
+                        msg_text = await ows.recv()
+                        data = json.loads(msg_text)
+                        t = data.get("type")
+
+                        if t in (
+                            "session.created", "session.updated", "error",
+                            "input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped",
+                            "response.created", "response.done", "response.audio.done"
+                        ):
+                            log("[openai]", f"{t} {data}")
+
+                        if t == "input_audio_buffer.speech_started":
+                            # fresh utterance window
+                            twilio_first_ts = None
+                            twilio_last_ts = None
+                            awaiting_turn = True
+
+                            # If AI is currently speaking and user starts talking -> barge-in
+                            if stream_sid and ai_speaking:
+                                await ws.send_text(json.dumps({"event": "clear", "streamSid": stream_sid}))
+                                log("[bridge]", "barge-in -> sent clear")
+
+                        if t == "input_audio_buffer.speech_stopped":
+                            # gate using Twilio timestamps (best available here)
+                            dur = None
+                            if twilio_first_ts is not None and twilio_last_ts is not None:
+                                dur = int(twilio_last_ts) - int(twilio_first_ts)
+
+                            log("[vad]", f"speech_stopped approx_dur_ms={dur}")
+
+                            # If it's probably a cough/noise -> ignore and clear buffer
+                            if dur is not None and dur < MIN_UTTER_MS:
+                                log("[vad]", "too short -> ignore (noise)")
+                                awaiting_turn = False
+                                twilio_first_ts = None
+                                twilio_last_ts = None
+                                try:
+                                    await ows.send(json.dumps({"type": "input_audio_buffer.clear"}))
+                                except Exception:
+                                    pass
+                                continue
+
+                            # Commit (safe: you likely have enough audio if speech_stopped fired normally)
+                            try:
+                                await ows.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                                log("[openai]", "sent input_audio_buffer.commit")
+                            except Exception as e:
+                                log("[openai][commit_err]", repr(e))
+                                # If commit failed, don't create a response
+                                awaiting_turn = False
+                                continue
+
+                            # NOW explicitly ask for a response (prevents random noise replies)
+                            try:
+                                await ows.send(json.dumps({
+                                    "type": "response.create",
+                                    "response": {
+                                        "modalities": ["audio", "text"],
+                                        # You can optionally add extra per-response instructions here.
+                                        # "instructions": SYSTEM_PROMPT,
+                                    }
+                                }))
+                                log("[openai]", "sent response.create")
+                            except Exception as e:
+                                log("[openai][resp_create_err]", repr(e))
+
+                            awaiting_turn = False
+                            twilio_first_ts = None
+                            twilio_last_ts = None
+
+                        if t == "response.audio.delta" and stream_sid:
+                            b64_delta = data.get("delta")
+                            if b64_delta:
+                                ai_speaking = True
+                                await ws.send_text(json.dumps({
+                                    "event": "media",
+                                    "streamSid": stream_sid,
+                                    "media": {"payload": b64_delta}
+                                }))
+                                sent_to_twilio += 1
+                                if sent_to_twilio % 50 == 0:
+                                    log("[bridge]", f"forwarded audio chunks to twilio={sent_to_twilio}")
+
+                        if t in ("response.audio.done", "response.done"):
+                            ai_speaking = False
+
+                except websockets.exceptions.ConnectionClosedError as e:
+                    log("[openai][closed]", f"code={e.code} reason={e.reason}")
+                except Exception as e:
+                    log("[openai][err]", repr(e))
+
+            await asyncio.gather(
+                twilio_receiver(),
+                openai_sender(),
+                openai_receiver(),
+            )
+
+    except websockets.exceptions.ConnectionClosedError as e:
+        log("[openai][closed]", f"code={e.code} reason={e.reason}")
+    except Exception as e:
+        log("[bridge][err]", repr(e))
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+        log("[twilio]", "WebSocket closed")

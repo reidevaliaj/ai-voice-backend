@@ -1,7 +1,8 @@
 # routes/events.py
+import json
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from tools.storage import append_event
 from tools.email_resend import send_email_resend
@@ -27,6 +28,16 @@ class CallEndPayload(BaseModel):
     timestamp: Optional[int] = None
 
 
+class TranscriptPayload(BaseModel):
+    tenant_id: str
+    room_name: Optional[str] = None
+    caller_id: Optional[str] = None
+    shutdown_reason: Optional[str] = None
+    timestamp: Optional[int] = None
+    transcript: str = ""
+    messages: List[Dict[str, Any]] = []
+
+
 @router.post("/events/call-end")
 async def call_end(payload: CallEndPayload):
     try:
@@ -35,6 +46,7 @@ async def call_end(payload: CallEndPayload):
 
         # 2) email notification (simple first version)
         subject = f"[Code Studio] Call summary ({payload.call_type})"
+        notes_html = (payload.notes or "").replace("\n", "<br/>")
         html = f"""
         <h3>Call Summary</h3>
         <p><b>Type:</b> {payload.call_type}</p>
@@ -49,7 +61,7 @@ async def call_end(payload: CallEndPayload):
         <p><b>Room:</b> {payload.room_name}</p>
         <hr/>
         <p><b>Notes:</b></p>
-        <p>{(payload.notes or "").replace("\n", "<br/>")}</p>
+        <p>{notes_html}</p>
         """
 
         send_email_resend(
@@ -60,6 +72,19 @@ async def call_end(payload: CallEndPayload):
             reply_to="Rej Aliaj <info@code-studio.eu>",
         )
 
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/events/transcript")
+async def transcript_event(payload: TranscriptPayload):
+    try:
+        print(
+            ">>> TRANSCRIPT EVENT:",
+            json.dumps(payload.model_dump(), ensure_ascii=False),
+            flush=True,
+        )
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

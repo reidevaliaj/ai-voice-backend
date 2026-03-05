@@ -1,5 +1,6 @@
 # routes/events.py
 import json
+import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -8,6 +9,7 @@ from tools.storage import append_event
 from tools.email_resend import send_email_resend
 
 router = APIRouter()
+logger = logging.getLogger("events")
 
 OWNER_EMAIL = "info@code-studio.eu"  # change if you want
 
@@ -80,10 +82,22 @@ async def call_end(payload: CallEndPayload):
 @router.post("/events/transcript")
 async def transcript_event(payload: TranscriptPayload):
     try:
-        print(
-            ">>> TRANSCRIPT EVENT:",
+        logger.info(
+            "[TRANSCRIPT_EVENT] received tenant_id=%s room=%s caller_id=%s reason=%s messages=%s chars=%s",
+            payload.tenant_id,
+            payload.room_name,
+            payload.caller_id,
+            payload.shutdown_reason,
+            len(payload.messages),
+            len(payload.transcript or ""),
+        )
+        logger.info(
+            "[TRANSCRIPT_EVENT] preview=%s",
+            (payload.transcript or "")[:500].replace("\n", " | "),
+        )
+        logger.info(
+            "[TRANSCRIPT_EVENT] raw=%s",
             json.dumps(payload.model_dump(), ensure_ascii=False),
-            flush=True,
         )
         return {"ok": True}
     except Exception as e:

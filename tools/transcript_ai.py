@@ -41,6 +41,10 @@ def _fallback_result() -> Dict[str, Any]:
         "meeting_requested": False,
         "case_reported": False,
         "meeting_reason": "",
+        "meeting_confirmed": False,
+        "meeting_start_iso": "",
+        "meeting_end_iso": "",
+        "meeting_timezone": "",
         "case_reason": "",
         "preferred_time_window": "",
         "problem_description": "",
@@ -48,7 +52,12 @@ def _fallback_result() -> Dict[str, Any]:
     }
 
 
-def analyze_transcript(transcript: str, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+def analyze_transcript(
+    transcript: str,
+    messages: List[Dict[str, Any]],
+    current_time_utc_iso: str = "",
+    business_timezone: str = "Europe/Budapest",
+) -> Dict[str, Any]:
     result = _fallback_result()
     if not transcript.strip():
         return result
@@ -75,12 +84,21 @@ Important extraction rules:
 
 Required JSON fields:
 summary, caller_name, company, contact_email, contact_phone, call_intent, meeting_requested, case_reported,
-meeting_reason, case_reason, preferred_time_window, problem_description, confidence
+meeting_reason, meeting_confirmed, meeting_start_iso, meeting_end_iso, meeting_timezone,
+case_reason, preferred_time_window, problem_description, confidence
+
+Meeting extraction rules:
+- Set meeting_confirmed=true only if the caller and assistant clearly agreed a specific meeting date+time.
+- If confirmed, provide meeting_start_iso and meeting_end_iso as ISO8601 with timezone offset.
+- If time is mentioned without timezone, assume business timezone.
+- If no confirmed concrete time, keep meeting_confirmed=false and leave ISO fields empty.
 """.strip()
 
     user_payload = {
         "transcript": transcript,
         "messages": messages,
+        "current_time_utc_iso": current_time_utc_iso,
+        "business_timezone": business_timezone,
     }
 
     body = {
@@ -118,5 +136,6 @@ meeting_reason, case_reason, preferred_time_window, problem_description, confide
 
     result["contact_email"] = _normalize_email(str(result.get("contact_email", "")))
     result["meeting_requested"] = bool(result.get("meeting_requested", False))
+    result["meeting_confirmed"] = bool(result.get("meeting_confirmed", False))
     result["case_reported"] = bool(result.get("case_reported", False))
     return result

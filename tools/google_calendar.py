@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib import parse, request
+from urllib.error import HTTPError
 from zoneinfo import ZoneInfo
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
@@ -89,8 +90,16 @@ def _get_busy_blocks(time_min: datetime, time_max: datetime) -> List[Tuple[datet
         },
         method="POST",
     )
-    with request.urlopen(req, timeout=20) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    try:
+        with request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = ""
+        raise RuntimeError(f"Google freeBusy failed: HTTP {e.code} {body}") from e
     busy = data.get("calendars", {}).get(GOOGLE_CALENDAR_ID, {}).get("busy", [])
     blocks: List[Tuple[datetime, datetime]] = []
     for item in busy:

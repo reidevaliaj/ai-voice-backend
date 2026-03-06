@@ -1,0 +1,122 @@
+import json
+import logging
+import os
+import re
+from typing import Any, Dict, List
+from urllib import request
+
+logger = logging.getLogger("transcript_ai")
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("TRANSCRIPT_DECISION_MODEL", "gpt-4.1-mini")
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+
+
+def _normalize_email(value: str) -> str:
+    if not value:
+        return ""
+    text = value.strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    text = text.replace(" at ", "@")
+    text = text.replace("(at)", "@")
+    text = text.replace(" dot ", ".")
+    text = text.replace("(dot)", ".")
+    text = text.replace(" underscore ", "_")
+    text = text.replace(" dash ", "-")
+    text = text.replace(" ", "")
+
+    if re.fullmatch(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", text):
+        return text
+    return ""
+
+
+def _fallback_result() -> Dict[str, Any]:
+    return {
+        "summary": "",
+        "caller_name": "",
+        "company": "",
+        "contact_email": "",
+        "contact_phone": "",
+        "call_intent": "other",
+        "meeting_requested": False,
+        "case_reported": False,
+        "meeting_reason": "",
+        "case_reason": "",
+        "preferred_time_window": "",
+        "problem_description": "",
+        "confidence": 0.0,
+    }
+
+
+def analyze_transcript(transcript: str, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    result = _fallback_result()
+    if not transcript.strip():
+        return result
+    if not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY missing, using fallback transcript analysis")
+        return result
+
+    system_prompt = """
+You are a call-analysis engine for an AI receptionist.
+Return STRICT JSON only.
+
+Goals:
+1) Extract key information from the transcript.
+2) Decide which tools should run:
+   - meeting_requested: true only if caller asked for a meeting/call scheduling.
+   - case_reported: true only if caller reported an issue/problem with an existing product/service.
+3) Always provide a concise summary.
+
+Important extraction rules:
+- Caller email may be spoken informally, e.g. "rei aliaj at hotmail dot com".
+- Normalize such spoken email into a valid email string when possible.
+- If uncertain, return empty string.
+- Do not invent facts not present in the transcript.
+
+Required JSON fields:
+summary, caller_name, company, contact_email, contact_phone, call_intent, meeting_requested, case_reported,
+meeting_reason, case_reason, preferred_time_window, problem_description, confidence
+""".strip()
+
+    user_payload = {
+        "transcript": transcript,
+        "messages": messages,
+    }
+
+    body = {
+        "model": OPENAI_MODEL,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ],
+    }
+
+    req = request.Request(
+        OPENAI_URL,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+        data = json.loads(raw)
+        content = data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            return result
+        result.update(parsed)
+    except Exception:
+        logger.exception("OpenAI transcript analysis failed")
+        return result
+
+    result["contact_email"] = _normalize_email(str(result.get("contact_email", "")))
+    result["meeting_requested"] = bool(result.get("meeting_requested", False))
+    result["case_reported"] = bool(result.get("case_reported", False))
+    return result

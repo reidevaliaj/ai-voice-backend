@@ -13,6 +13,7 @@ from tools.transcript_ai import analyze_transcript
 from tools.google_calendar import (
     BUSINESS_TIMEZONE,
     create_meeting_event,
+    get_fallback_slots_next_two_weeks,
     get_free_slots_next_two_weeks,
 )
 
@@ -298,4 +299,24 @@ async def check_availability(req: CheckAvailabilityReq):
         )
         return {"ok": True, **result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(
+            "[TOOL check-availability] calendar lookup failed tenant_id=%s duration=%s",
+            req.tenant_id,
+            req.duration_minutes,
+        )
+        fallback = get_fallback_slots_next_two_weeks(
+            duration_minutes=req.duration_minutes,
+            max_slots=req.max_slots,
+        )
+        logger.warning(
+            "[TOOL check-availability] using fallback slots tenant_id=%s slots=%s error=%s",
+            req.tenant_id,
+            len(fallback.get("slots", [])),
+            str(e),
+        )
+        return {
+            "ok": True,
+            "degraded": True,
+            "degraded_reason": str(e),
+            **fallback,
+        }

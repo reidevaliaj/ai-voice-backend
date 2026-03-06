@@ -174,6 +174,47 @@ def get_free_slots_next_two_weeks(
     }
 
 
+def get_fallback_slots_next_two_weeks(
+    duration_minutes: int = 30,
+    max_slots: int = 10,
+) -> Dict[str, Any]:
+    if duration_minutes <= 0:
+        duration_minutes = 30
+    now = datetime.now(timezone.utc)
+    end = now + timedelta(days=14)
+    allowed_days = {int(x.strip()) for x in BUSINESS_DAYS.split(",") if x.strip()}
+    tz = ZoneInfo(BUSINESS_TIMEZONE)
+    slots: List[Dict[str, str]] = []
+
+    cursor_day = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    last_day = end.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    while cursor_day <= last_day and len(slots) < max_slots:
+        if cursor_day.isoweekday() in allowed_days:
+            b_start, b_end = _business_window_for_day(cursor_day)
+            start = max(b_start, now.astimezone(tz))
+            while start + timedelta(minutes=duration_minutes) <= b_end:
+                end_slot = start + timedelta(minutes=duration_minutes)
+                slots.append(
+                    {
+                        "start": start.isoformat(),
+                        "end": end_slot.isoformat(),
+                    }
+                )
+                if len(slots) >= max_slots:
+                    break
+                start = end_slot
+        cursor_day = cursor_day + timedelta(days=1)
+
+    return {
+        "timezone": BUSINESS_TIMEZONE,
+        "duration_minutes": duration_minutes,
+        "horizon_days": 14,
+        "slots": slots,
+        "fallback": True,
+    }
+
+
 def create_meeting_event(
     title: str,
     description: str,

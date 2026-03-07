@@ -157,9 +157,10 @@ def _run_meeting_creation(payload: TranscriptPayload, analysis: Dict[str, Any]) 
     record["status"] = "created" if create_resp.get("created") else "skipped"
     append_event("meeting_creation_events.jsonl", record)
     logger.info(
-        "[TOOL meeting-creation] status=%s room=%s",
+        "[TOOL meeting-creation] status=%s room=%s result=%s",
         record["status"],
         payload.room_name,
+        json.dumps(create_resp, ensure_ascii=False),
     )
 
 

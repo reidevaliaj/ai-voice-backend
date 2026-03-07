@@ -1,5 +1,6 @@
 import json
 import os
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib import parse, request
@@ -14,6 +15,11 @@ GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "")
 BUSINESS_TIMEZONE = os.getenv("BUSINESS_TIMEZONE", "Europe/Budapest")
 BUSINESS_HOURS = os.getenv("BUSINESS_HOURS", "09:00-17:00")
 BUSINESS_DAYS = os.getenv("BUSINESS_DAYS", "1,2,3,4,5")
+MEETING_ENFORCE_BUSY_RECHECK = (
+    os.getenv("MEETING_ENFORCE_BUSY_RECHECK", "false").strip().lower() == "true"
+)
+
+logger = logging.getLogger("google_calendar")
 
 
 def _iso(dt: datetime) -> str:
@@ -409,13 +415,24 @@ def create_meeting_event(
     if end_dt <= start_dt:
         raise ValueError("meeting end must be after meeting start")
     if start_dt > now + timedelta(days=14):
+        logger.info(
+            "[CALENDAR create] skipped outside horizon start=%s end=%s",
+            start_dt.isoformat(),
+            end_dt.isoformat(),
+        )
         return {"created": False, "reason": "outside_two_weeks"}
 
-    # Deterministic guard: re-check the slot before creating.
-    busy = _get_busy_blocks(start_dt, end_dt)
-    for busy_start, busy_end in busy:
-        if not (busy_end <= start_dt or busy_start >= end_dt):
-            return {"created": False, "reason": "slot_not_free"}
+    # Optional deterministic guard: disable by default to avoid false negatives.
+    if MEETING_ENFORCE_BUSY_RECHECK:
+        busy = _get_busy_blocks(start_dt, end_dt)
+        for busy_start, busy_end in busy:
+            if not (busy_end <= start_dt or busy_start >= end_dt):
+                logger.info(
+                    "[CALENDAR create] skipped busy overlap start=%s end=%s",
+                    start_dt.isoformat(),
+                    end_dt.isoformat(),
+                )
+                return {"created": False, "reason": "slot_not_free"}
 
     token = _get_access_token()
     url = f"https://www.googleapis.com/calendar/v3/calendars/{parse.quote(GOOGLE_CALENDAR_ID, safe='')}/events"
@@ -436,4 +453,10 @@ def create_meeting_event(
     )
     with request.urlopen(req, timeout=20) as resp:
         data = json.loads(resp.read().decode("utf-8"))
+    logger.info(
+        "[CALENDAR create] created event_id=%s start=%s end=%s",
+        data.get("id"),
+        start_dt.isoformat(),
+        end_dt.isoformat(),
+    )
     return {"created": True, "event_id": data.get("id"), "html_link": data.get("htmlLink")}

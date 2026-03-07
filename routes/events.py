@@ -16,7 +16,9 @@ from tools.google_calendar import (
     create_meeting_event,
     get_fallback_slots_next_two_weeks,
     get_free_slots_next_two_weeks,
+    update_calendar_event_with_zoom,
 )
+from tools.zoom_meetings import create_zoom_meeting
 
 router = APIRouter()
 logger = logging.getLogger("events")
@@ -27,6 +29,7 @@ REPLY_TO_EMAIL = os.getenv("REPLY_TO_EMAIL", "Rej Aliaj <info@code-studio.eu>")
 ENABLE_LEGACY_CALL_END_EMAIL = (
     os.getenv("ENABLE_LEGACY_CALL_END_EMAIL", "false").strip().lower() == "true"
 )
+MEETING_OWNER_EMAIL = os.getenv("MEETING_OWNER_EMAIL", "aliajrei@gmail.com").strip()
 
 
 class CallEndPayload(BaseModel):
@@ -146,21 +149,69 @@ def _run_meeting_creation(payload: TranscriptPayload, analysis: Dict[str, Any]) 
         f"Reason: {analysis.get('meeting_reason', '')}\n"
         f"Summary: {analysis.get('summary', '')}"
     )
+    client_email = str(analysis.get("contact_email", "") or "").strip()
+    attendees: List[str] = [MEETING_OWNER_EMAIL]
+    if "@" in client_email:
+        attendees.append(client_email)
+    attendees = list(dict.fromkeys([a for a in attendees if "@" in a]))
 
     create_resp = create_meeting_event(
         title=title,
         description=description,
         start_iso=str(record["meeting_start_iso"]),
         end_iso=str(record["meeting_end_iso"]),
+        attendees=attendees,
     )
     record["calendar_result"] = create_resp
-    record["status"] = "created" if create_resp.get("created") else "skipped"
+
+    if not create_resp.get("created"):
+        record["status"] = "skipped"
+        append_event("meeting_creation_events.jsonl", record)
+        logger.info(
+            "[TOOL meeting-creation] status=%s room=%s result=%s",
+            record["status"],
+            payload.room_name,
+            json.dumps({"calendar": create_resp}, ensure_ascii=False),
+        )
+        return
+
+    zoom_result: Dict[str, Any] = {"created": False}
+    calendar_zoom_update: Dict[str, Any] = {"updated": False}
+    try:
+        zoom_result = create_zoom_meeting(
+            start_iso=str(record["meeting_start_iso"]),
+            end_iso=str(record["meeting_end_iso"]),
+            topic=title,
+            agenda=description,
+            client_email=client_email,
+            timezone_name=str(record.get("meeting_timezone") or BUSINESS_TIMEZONE),
+        )
+        if zoom_result.get("created") and create_resp.get("event_id"):
+            calendar_zoom_update = update_calendar_event_with_zoom(
+                event_id=str(create_resp.get("event_id")),
+                zoom_join_url=str(zoom_result.get("join_url") or ""),
+                attendees=attendees,
+            )
+    except Exception as e:
+        logger.exception("[TOOL meeting-creation] zoom step failed room=%s", payload.room_name)
+        zoom_result = {"created": False, "error": str(e)}
+
+    record["zoom_result"] = zoom_result
+    record["calendar_zoom_update"] = calendar_zoom_update
+    record["status"] = "created_with_zoom" if zoom_result.get("created") else "created_without_zoom"
     append_event("meeting_creation_events.jsonl", record)
     logger.info(
         "[TOOL meeting-creation] status=%s room=%s result=%s",
         record["status"],
         payload.room_name,
-        json.dumps(create_resp, ensure_ascii=False),
+        json.dumps(
+            {
+                "calendar": create_resp,
+                "zoom": zoom_result,
+                "calendar_zoom_update": calendar_zoom_update,
+            },
+            ensure_ascii=False,
+        ),
     )
 
 

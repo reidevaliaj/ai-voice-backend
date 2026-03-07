@@ -408,6 +408,8 @@ def create_meeting_event(
     description: str,
     start_iso: str,
     end_iso: str,
+    attendees: Optional[List[str]] = None,
+    meeting_link: str = "",
 ) -> Dict[str, Any]:
     start_dt = _parse_iso(start_iso)
     end_dt = _parse_iso(end_iso)
@@ -436,14 +438,26 @@ def create_meeting_event(
 
     token = _get_access_token()
     url = f"https://www.googleapis.com/calendar/v3/calendars/{parse.quote(GOOGLE_CALENDAR_ID, safe='')}/events"
+    valid_attendees = []
+    for email in attendees or []:
+        value = (email or "").strip()
+        if "@" in value:
+            valid_attendees.append({"email": value})
+
+    full_description = description or ""
+    if meeting_link:
+        full_description = (full_description + f"\n\nMeeting link: {meeting_link}").strip()
+
     body = {
         "summary": title,
-        "description": description,
+        "description": full_description,
         "start": {"dateTime": start_dt.astimezone(ZoneInfo(BUSINESS_TIMEZONE)).isoformat()},
         "end": {"dateTime": end_dt.astimezone(ZoneInfo(BUSINESS_TIMEZONE)).isoformat()},
+        "location": meeting_link or "",
+        "attendees": valid_attendees,
     }
     req = request.Request(
-        url,
+        f"{url}?sendUpdates=all",
         data=json.dumps(body).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {token}",
@@ -460,3 +474,59 @@ def create_meeting_event(
         end_dt.isoformat(),
     )
     return {"created": True, "event_id": data.get("id"), "html_link": data.get("htmlLink")}
+
+
+def update_calendar_event_with_zoom(
+    event_id: str,
+    zoom_join_url: str,
+    attendees: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    if not event_id:
+        return {"updated": False, "reason": "missing_event_id"}
+    if not zoom_join_url:
+        return {"updated": False, "reason": "missing_zoom_link"}
+
+    token = _get_access_token()
+    base = f"https://www.googleapis.com/calendar/v3/calendars/{parse.quote(GOOGLE_CALENDAR_ID, safe='')}/events/{parse.quote(event_id, safe='')}"
+    get_req = request.Request(
+        base,
+        headers={
+            "Authorization": f"Bearer {token}",
+            **_auth_headers(),
+        },
+        method="GET",
+    )
+    with request.urlopen(get_req, timeout=20) as resp:
+        current = json.loads(resp.read().decode("utf-8"))
+
+    current_description = str(current.get("description", "") or "")
+    if zoom_join_url not in current_description:
+        current_description = (current_description + f"\n\nMeeting link: {zoom_join_url}").strip()
+
+    valid_attendees = []
+    for email in attendees or []:
+        value = (email or "").strip()
+        if "@" in value:
+            valid_attendees.append({"email": value})
+
+    patch_body = {
+        "description": current_description,
+        "location": zoom_join_url,
+    }
+    if valid_attendees:
+        patch_body["attendees"] = valid_attendees
+
+    patch_req = request.Request(
+        f"{base}?sendUpdates=all",
+        data=json.dumps(patch_body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            **_auth_headers(),
+        },
+        method="PATCH",
+    )
+    with request.urlopen(patch_req, timeout=20) as resp:
+        updated = json.loads(resp.read().decode("utf-8"))
+
+    logger.info("[CALENDAR update] attached zoom link event_id=%s", event_id)
+    return {"updated": True, "html_link": updated.get("htmlLink")}

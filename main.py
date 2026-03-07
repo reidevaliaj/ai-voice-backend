@@ -10,6 +10,7 @@ from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 from routes.tools_email import router as email_router
 from routes.events import router as events_router
+from routes.zoom_oauth import router as zoom_oauth_router
 
 
 import websockets
@@ -18,6 +19,7 @@ app = FastAPI()
 
 app.include_router(email_router)
 app.include_router(events_router)
+app.include_router(zoom_oauth_router)
 
 @app.api_route("/incoming-call", methods=["GET", "POST"])
 async def incoming_call(request: Request):

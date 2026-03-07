@@ -12,6 +12,7 @@ from tools.email_resend import send_email_resend
 from tools.transcript_ai import analyze_transcript
 from tools.google_calendar import (
     BUSINESS_TIMEZONE,
+    check_meeting_slot,
     create_meeting_event,
     get_fallback_slots_next_two_weeks,
     get_free_slots_next_two_weeks,
@@ -57,7 +58,14 @@ class TranscriptPayload(BaseModel):
 class CheckAvailabilityReq(BaseModel):
     tenant_id: str = "default"
     duration_minutes: int = 30
-    max_slots: int = 8
+    max_slots: int = 200
+
+
+class CheckMeetingSlotReq(BaseModel):
+    tenant_id: str = "default"
+    preferred_start_iso: str
+    duration_minutes: int = 30
+    alternatives_limit: int = 3
 
 
 def _format_timestamp(ts: Optional[int]) -> str:
@@ -291,6 +299,7 @@ async def check_availability(req: CheckAvailabilityReq):
             duration_minutes=req.duration_minutes,
             max_slots=req.max_slots,
         )
+
         logger.info(
             "[TOOL check-availability] tenant_id=%s slots=%s duration=%s",
             req.tenant_id,
@@ -319,4 +328,39 @@ async def check_availability(req: CheckAvailabilityReq):
             "degraded": True,
             "degraded_reason": str(e),
             **fallback,
+        }
+
+
+@router.post("/tools/check-meeting-slot")
+async def check_meeting_slot_route(req: CheckMeetingSlotReq):
+    try:
+        result = check_meeting_slot(
+            preferred_start_iso=req.preferred_start_iso,
+            duration_minutes=req.duration_minutes,
+            alternatives_limit=req.alternatives_limit,
+        )
+        logger.info(
+            "[TOOL check-meeting-slot] tenant_id=%s status=%s preferred=%s duration=%s",
+            req.tenant_id,
+            result.get("status"),
+            req.preferred_start_iso,
+            req.duration_minutes,
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        logger.exception(
+            "[TOOL check-meeting-slot] failed tenant_id=%s preferred=%s duration=%s",
+            req.tenant_id,
+            req.preferred_start_iso,
+            req.duration_minutes,
+        )
+        return {
+            "ok": True,
+            "status": "unavailable",
+            "degraded": True,
+            "degraded_reason": str(e),
+            "next_slots": [],
+            "day_blocks": [],
+            "timezone": BUSINESS_TIMEZONE,
+            "duration_minutes": req.duration_minutes,
         }

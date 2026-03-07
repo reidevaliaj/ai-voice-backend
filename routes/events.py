@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -71,6 +72,27 @@ class CheckMeetingSlotReq(BaseModel):
     alternatives_limit: int = 3
 
 
+def _load_last_jsonl_record(filename: str) -> Optional[Dict[str, Any]]:
+    path = Path("data") / filename
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+    except Exception:
+        return None
+    if not lines:
+        return None
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def _format_timestamp(ts: Optional[int]) -> str:
     if not ts:
         return ""
@@ -130,89 +152,115 @@ def _run_meeting_creation(payload: TranscriptPayload, analysis: Dict[str, Any]) 
         "status": "pending",
     }
 
-    if not record["meeting_confirmed"] or not record["meeting_start_iso"] or not record["meeting_end_iso"]:
-        append_event("meeting_creation_events.jsonl", record)
-        logger.info(
-            "[TOOL meeting-creation] pending (no confirmed slot) room=%s caller=%s",
-            payload.room_name,
-            analysis.get("caller_name", ""),
+    try:
+        if not record["meeting_confirmed"] or not record["meeting_start_iso"] or not record["meeting_end_iso"]:
+            append_event("meeting_creation_events.jsonl", record)
+            print(
+                ">>> MEETING CREATION:",
+                json.dumps(record, ensure_ascii=False),
+                flush=True,
+            )
+            logger.info(
+                "[TOOL meeting-creation] pending (no confirmed slot) room=%s caller=%s",
+                payload.room_name,
+                analysis.get("caller_name", ""),
+            )
+            return
+
+        title = f"Call with {analysis.get('caller_name') or 'Lead'}"
+        description = (
+            f"Source room: {payload.room_name}\n"
+            f"Caller: {analysis.get('caller_name', '')}\n"
+            f"Company: {analysis.get('company', '')}\n"
+            f"Email: {analysis.get('contact_email', '')}\n"
+            f"Phone: {analysis.get('contact_phone', '')}\n"
+            f"Reason: {analysis.get('meeting_reason', '')}\n"
+            f"Summary: {analysis.get('summary', '')}"
         )
-        return
+        client_email = str(analysis.get("contact_email", "") or "").strip()
+        attendees: List[str] = [MEETING_OWNER_EMAIL]
+        if "@" in client_email:
+            attendees.append(client_email)
+        attendees = list(dict.fromkeys([a for a in attendees if "@" in a]))
 
-    title = f"Call with {analysis.get('caller_name') or 'Lead'}"
-    description = (
-        f"Source room: {payload.room_name}\n"
-        f"Caller: {analysis.get('caller_name', '')}\n"
-        f"Company: {analysis.get('company', '')}\n"
-        f"Email: {analysis.get('contact_email', '')}\n"
-        f"Phone: {analysis.get('contact_phone', '')}\n"
-        f"Reason: {analysis.get('meeting_reason', '')}\n"
-        f"Summary: {analysis.get('summary', '')}"
-    )
-    client_email = str(analysis.get("contact_email", "") or "").strip()
-    attendees: List[str] = [MEETING_OWNER_EMAIL]
-    if "@" in client_email:
-        attendees.append(client_email)
-    attendees = list(dict.fromkeys([a for a in attendees if "@" in a]))
+        create_resp = create_meeting_event(
+            title=title,
+            description=description,
+            start_iso=str(record["meeting_start_iso"]),
+            end_iso=str(record["meeting_end_iso"]),
+            attendees=attendees,
+        )
+        record["calendar_result"] = create_resp
 
-    create_resp = create_meeting_event(
-        title=title,
-        description=description,
-        start_iso=str(record["meeting_start_iso"]),
-        end_iso=str(record["meeting_end_iso"]),
-        attendees=attendees,
-    )
-    record["calendar_result"] = create_resp
+        if not create_resp.get("created"):
+            record["status"] = "skipped"
+            append_event("meeting_creation_events.jsonl", record)
+            print(
+                ">>> MEETING CREATION:",
+                json.dumps(record, ensure_ascii=False),
+                flush=True,
+            )
+            logger.info(
+                "[TOOL meeting-creation] status=%s room=%s result=%s",
+                record["status"],
+                payload.room_name,
+                json.dumps({"calendar": create_resp}, ensure_ascii=False),
+            )
+            return
 
-    if not create_resp.get("created"):
-        record["status"] = "skipped"
+        zoom_result: Dict[str, Any] = {"created": False}
+        calendar_zoom_update: Dict[str, Any] = {"updated": False}
+        try:
+            zoom_result = create_zoom_meeting(
+                start_iso=str(record["meeting_start_iso"]),
+                end_iso=str(record["meeting_end_iso"]),
+                topic=title,
+                agenda=description,
+                client_email=client_email,
+                timezone_name=str(record.get("meeting_timezone") or BUSINESS_TIMEZONE),
+            )
+            if zoom_result.get("created") and create_resp.get("event_id"):
+                calendar_zoom_update = update_calendar_event_with_zoom(
+                    event_id=str(create_resp.get("event_id")),
+                    zoom_join_url=str(zoom_result.get("join_url") or ""),
+                    attendees=attendees,
+                )
+        except Exception as e:
+            logger.exception("[TOOL meeting-creation] zoom step failed room=%s", payload.room_name)
+            zoom_result = {"created": False, "error": str(e)}
+
+        record["zoom_result"] = zoom_result
+        record["calendar_zoom_update"] = calendar_zoom_update
+        record["status"] = "created_with_zoom" if zoom_result.get("created") else "created_without_zoom"
         append_event("meeting_creation_events.jsonl", record)
+        print(
+            ">>> MEETING CREATION:",
+            json.dumps(record, ensure_ascii=False),
+            flush=True,
+        )
         logger.info(
             "[TOOL meeting-creation] status=%s room=%s result=%s",
             record["status"],
             payload.room_name,
-            json.dumps({"calendar": create_resp}, ensure_ascii=False),
+            json.dumps(
+                {
+                    "calendar": create_resp,
+                    "zoom": zoom_result,
+                    "calendar_zoom_update": calendar_zoom_update,
+                },
+                ensure_ascii=False,
+            ),
         )
-        return
-
-    zoom_result: Dict[str, Any] = {"created": False}
-    calendar_zoom_update: Dict[str, Any] = {"updated": False}
-    try:
-        zoom_result = create_zoom_meeting(
-            start_iso=str(record["meeting_start_iso"]),
-            end_iso=str(record["meeting_end_iso"]),
-            topic=title,
-            agenda=description,
-            client_email=client_email,
-            timezone_name=str(record.get("meeting_timezone") or BUSINESS_TIMEZONE),
-        )
-        if zoom_result.get("created") and create_resp.get("event_id"):
-            calendar_zoom_update = update_calendar_event_with_zoom(
-                event_id=str(create_resp.get("event_id")),
-                zoom_join_url=str(zoom_result.get("join_url") or ""),
-                attendees=attendees,
-            )
     except Exception as e:
-        logger.exception("[TOOL meeting-creation] zoom step failed room=%s", payload.room_name)
-        zoom_result = {"created": False, "error": str(e)}
-
-    record["zoom_result"] = zoom_result
-    record["calendar_zoom_update"] = calendar_zoom_update
-    record["status"] = "created_with_zoom" if zoom_result.get("created") else "created_without_zoom"
-    append_event("meeting_creation_events.jsonl", record)
-    logger.info(
-        "[TOOL meeting-creation] status=%s room=%s result=%s",
-        record["status"],
-        payload.room_name,
-        json.dumps(
-            {
-                "calendar": create_resp,
-                "zoom": zoom_result,
-                "calendar_zoom_update": calendar_zoom_update,
-            },
-            ensure_ascii=False,
-        ),
-    )
+        record["status"] = "error"
+        record["error"] = str(e)
+        append_event("meeting_creation_events.jsonl", record)
+        print(
+            ">>> MEETING CREATION ERROR:",
+            json.dumps(record, ensure_ascii=False),
+            flush=True,
+        )
+        logger.exception("[TOOL meeting-creation] pipeline failed room=%s", payload.room_name)
 
 
 def _run_case_creation(payload: TranscriptPayload, analysis: Dict[str, Any]) -> None:
@@ -334,6 +382,11 @@ async def transcript_event(payload: TranscriptPayload):
         if bool(analysis.get("meeting_requested", False)):
             _run_meeting_creation(payload, analysis)
             tools_run.append("meeting-creation")
+        else:
+            logger.info(
+                "[TOOL meeting-creation] skipped (meeting_requested=false) room=%s",
+                payload.room_name,
+            )
 
         if bool(analysis.get("case_reported", False)):
             _run_case_creation(payload, analysis)
@@ -416,3 +469,13 @@ async def check_meeting_slot_route(req: CheckMeetingSlotReq):
             "timezone": BUSINESS_TIMEZONE,
             "duration_minutes": req.duration_minutes,
         }
+
+
+@router.get("/debug/meeting-last")
+async def debug_meeting_last():
+    return {
+        "ok": True,
+        "last_meeting_creation": _load_last_jsonl_record("meeting_creation_events.jsonl"),
+        "last_transcript_analysis": _load_last_jsonl_record("transcript_analysis_events.jsonl"),
+        "last_transcript_event": _load_last_jsonl_record("transcript_events.jsonl"),
+    }

@@ -2,7 +2,7 @@
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -31,6 +31,9 @@ ENABLE_LEGACY_CALL_END_EMAIL = (
     os.getenv("ENABLE_LEGACY_CALL_END_EMAIL", "false").strip().lower() == "true"
 )
 MEETING_OWNER_EMAIL = os.getenv("MEETING_OWNER_EMAIL", "aliajrei@gmail.com").strip()
+DEFAULT_MEETING_DURATION_MINUTES = int(
+    os.getenv("DEFAULT_MEETING_DURATION_MINUTES", "30").strip() or "30"
+)
 
 
 class CallEndPayload(BaseModel):
@@ -103,6 +106,21 @@ def _to_html(text: str) -> str:
     return (text or "").replace("\n", "<br/>")
 
 
+def _infer_end_iso(start_iso: str, duration_minutes: int) -> str:
+    value = (start_iso or "").strip()
+    if not value:
+        return ""
+    try:
+        start_dt = datetime.fromisoformat(value)
+    except ValueError:
+        try:
+            start_dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+    end_dt = start_dt + timedelta(minutes=max(duration_minutes, 1))
+    return end_dt.isoformat()
+
+
 def _send_email_summary(payload: TranscriptPayload, analysis: Dict[str, Any]) -> None:
     subject = f"[AI Voice] Call summary - {analysis.get('call_intent') or 'other'}"
     html = f"""
@@ -151,6 +169,26 @@ def _run_meeting_creation(payload: TranscriptPayload, analysis: Dict[str, Any]) 
         "meeting_timezone": analysis.get("meeting_timezone", BUSINESS_TIMEZONE),
         "status": "pending",
     }
+
+    # LLM sometimes returns only meeting_start_iso. Infer end time deterministically.
+    if (
+        record["meeting_confirmed"]
+        and record["meeting_start_iso"]
+        and not record["meeting_end_iso"]
+    ):
+        inferred_end = _infer_end_iso(
+            str(record["meeting_start_iso"]),
+            DEFAULT_MEETING_DURATION_MINUTES,
+        )
+        if inferred_end:
+            record["meeting_end_iso"] = inferred_end
+            record["meeting_end_inferred"] = True
+            logger.info(
+                "[TOOL meeting-creation] inferred missing meeting_end_iso room=%s start=%s end=%s",
+                payload.room_name,
+                record["meeting_start_iso"],
+                record["meeting_end_iso"],
+            )
 
     try:
         if not record["meeting_confirmed"] or not record["meeting_start_iso"] or not record["meeting_end_iso"]:

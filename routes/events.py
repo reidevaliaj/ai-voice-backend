@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any
 
 from tools.storage import append_event
 from tools.email_resend import send_email_resend
-from tools.transcript_ai import analyze_transcript
+from tools.transcript_ai import analyze_transcript, decide_call_end
 from tools.google_calendar import (
     BUSINESS_TIMEZONE,
     check_meeting_slot,
@@ -57,6 +57,24 @@ class TranscriptPayload(BaseModel):
     room_name: Optional[str] = None
     caller_id: Optional[str] = None
     shutdown_reason: Optional[str] = None
+    timestamp: Optional[int] = None
+    transcript: str = ""
+    messages: List[Dict[str, Any]] = []
+
+
+class ValidateCallEndPayload(BaseModel):
+    tenant_id: str
+    call_type: str
+    name: Optional[str] = ""
+    company: Optional[str] = ""
+    contact_email: Optional[str] = ""
+    contact_phone: Optional[str] = ""
+    topic: Optional[str] = ""
+    notes: Optional[str] = ""
+    urgency: Optional[str] = ""
+    preferred_time_window: Optional[str] = ""
+    room_name: Optional[str] = None
+    caller_id: Optional[str] = None
     timestamp: Optional[int] = None
     transcript: str = ""
     messages: List[Dict[str, Any]] = []
@@ -506,6 +524,40 @@ async def check_meeting_slot_route(req: CheckMeetingSlotReq):
             "day_blocks": [],
             "timezone": BUSINESS_TIMEZONE,
             "duration_minutes": req.duration_minutes,
+        }
+
+
+@router.post("/tools/validate-call-end")
+async def validate_call_end_route(payload: ValidateCallEndPayload):
+    try:
+        decision = decide_call_end(payload.model_dump())
+        event = {
+            "tenant_id": payload.tenant_id,
+            "room_name": payload.room_name,
+            "caller_id": payload.caller_id,
+            "timestamp": payload.timestamp,
+            "call_type": payload.call_type,
+            "decision": decision,
+            "preview": (payload.transcript or "")[:400],
+        }
+        append_event("call_end_validation_events.jsonl", event)
+        logger.info(
+            "[TOOL validate-call-end] room=%s end_call=%s matched_rule=%s confidence=%.2f reason=%s",
+            payload.room_name,
+            decision.get("end_call", 0),
+            decision.get("matched_rule", "none"),
+            float(decision.get("confidence", 0.0) or 0.0),
+            decision.get("decision_reason", ""),
+        )
+        return {"ok": True, **decision}
+    except Exception as e:
+        logger.exception("[TOOL validate-call-end] failed room=%s", payload.room_name)
+        return {
+            "ok": True,
+            "end_call": 0,
+            "matched_rule": "none",
+            "decision_reason": f"validator_error:{e}",
+            "confidence": 0.0,
         }
 
 

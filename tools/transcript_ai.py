@@ -9,6 +9,7 @@ logger = logging.getLogger("transcript_ai")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("TRANSCRIPT_DECISION_MODEL", "gpt-4.1-mini")
+CALL_END_MODEL = os.getenv("CALL_END_DECISION_MODEL", OPENAI_MODEL or "gpt-4.1-mini")
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 
@@ -139,3 +140,94 @@ Meeting extraction rules:
     result["meeting_confirmed"] = bool(result.get("meeting_confirmed", False))
     result["case_reported"] = bool(result.get("case_reported", False))
     return result
+
+
+def decide_call_end(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Second-layer validator for call ending.
+    Returns:
+      {
+        "end_call": 0|1,
+        "matched_rule": "rule_1|rule_2|rule_3|none",
+        "decision_reason": "...",
+        "confidence": 0.0-1.0
+      }
+    """
+    fallback = {
+        "end_call": 0,
+        "matched_rule": "none",
+        "decision_reason": "validator_fallback",
+        "confidence": 0.0,
+    }
+    if not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY missing, using fallback call-end validator")
+        return fallback
+
+    system_prompt = """
+You are a strict validator that decides if an AI receptionist should end a live call.
+Return STRICT JSON only.
+
+You must approve end_call=1 only when one of these rules is satisfied:
+1) minimum contact details are captured and the conversation is clearly closing from both sides,
+2) sales/vendor solicitation caller is pushy after refusal,
+3) unrelated/off-topic caller is pushy after refusal.
+
+If uncertain, return end_call=0.
+Do not optimize for speed; optimize for correct end/no-end decision.
+
+Output JSON fields:
+- end_call: integer (0 or 1)
+- matched_rule: one of ["rule_1","rule_2","rule_3","none"]
+- decision_reason: short explanation
+- confidence: number between 0 and 1
+""".strip()
+
+    body = {
+        "model": CALL_END_MODEL,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ],
+    }
+
+    req = request.Request(
+        OPENAI_URL,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with request.urlopen(req, timeout=35) as resp:
+            raw = resp.read().decode("utf-8")
+        data = json.loads(raw)
+        content = data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            return fallback
+    except Exception:
+        logger.exception("OpenAI call-end validation failed")
+        return fallback
+
+    end_call_val = parsed.get("end_call", 0)
+    end_call = 1 if str(end_call_val).strip().lower() in ("1", "true", "yes") else 0
+    matched_rule = str(parsed.get("matched_rule", "none") or "none").strip() or "none"
+    if matched_rule not in ("rule_1", "rule_2", "rule_3", "none"):
+        matched_rule = "none"
+    reason = str(parsed.get("decision_reason", "") or "").strip() or "no_reason"
+    try:
+        confidence = float(parsed.get("confidence", 0.0) or 0.0)
+    except Exception:
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    return {
+        "end_call": end_call,
+        "matched_rule": matched_rule,
+        "decision_reason": reason,
+        "confidence": confidence,
+    }

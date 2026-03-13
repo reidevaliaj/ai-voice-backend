@@ -63,21 +63,7 @@ class TranscriptPayload(BaseModel):
 
 
 class ValidateCallEndPayload(BaseModel):
-    tenant_id: str
-    call_type: str
-    name: Optional[str] = ""
-    company: Optional[str] = ""
-    contact_email: Optional[str] = ""
-    contact_phone: Optional[str] = ""
-    topic: Optional[str] = ""
-    notes: Optional[str] = ""
-    urgency: Optional[str] = ""
-    preferred_time_window: Optional[str] = ""
-    room_name: Optional[str] = None
-    caller_id: Optional[str] = None
-    timestamp: Optional[int] = None
     transcript: str = ""
-    messages: List[Dict[str, Any]] = []
 
 
 class CheckAvailabilityReq(BaseModel):
@@ -532,32 +518,20 @@ async def validate_call_end_route(payload: ValidateCallEndPayload):
     try:
         decision = decide_call_end(payload.model_dump())
         event = {
-            "tenant_id": payload.tenant_id,
-            "room_name": payload.room_name,
-            "caller_id": payload.caller_id,
-            "timestamp": payload.timestamp,
-            "call_type": payload.call_type,
             "decision": decision,
             "preview": (payload.transcript or "")[:400],
         }
         append_event("call_end_validation_events.jsonl", event)
         logger.info(
-            "[TOOL validate-call-end] room=%s end_call=%s matched_rule=%s confidence=%.2f reason=%s",
-            payload.room_name,
+            "[TOOL validate-call-end] end_call=%s",
             decision.get("end_call", 0),
-            decision.get("matched_rule", "none"),
-            float(decision.get("confidence", 0.0) or 0.0),
-            decision.get("decision_reason", ""),
         )
-        return {"ok": True, **decision}
-    except Exception as e:
-        logger.exception("[TOOL validate-call-end] failed room=%s", payload.room_name)
+        return {"ok": True, "end_call": int(decision.get("end_call", 0) or 0)}
+    except Exception:
+        logger.exception("[TOOL validate-call-end] failed")
         return {
             "ok": True,
             "end_call": 0,
-            "matched_rule": "none",
-            "decision_reason": f"validator_error:{e}",
-            "confidence": 0.0,
         }
 
 

@@ -147,46 +147,29 @@ def decide_call_end(payload: Dict[str, Any]) -> Dict[str, Any]:
     Second-layer validator for call ending.
     Returns:
       {
-        "end_call": 0|1,
-        "matched_rule": "rule_1|rule_2|rule_3|none",
-        "decision_reason": "...",
-        "confidence": 0.0-1.0
+        "end_call": 0|1
       }
     """
-    fallback = {
-        "end_call": 0,
-        "matched_rule": "none",
-        "decision_reason": "validator_fallback",
-        "confidence": 0.0,
-    }
+    fallback = {"end_call": 0}
     if not OPENAI_API_KEY:
         logger.warning("OPENAI_API_KEY missing, using fallback call-end validator")
         return fallback
 
     system_prompt = """
-You are a strict validator that decides if an AI receptionist should end a live call.
+You are a strict validator helper for an Ai receptionist You help him by deciding to end the call or not.
 Return STRICT JSON only.
 
 Approve end_call=1 only when one rule is explicitly supported by evidence in transcript/messages.
 
-Rule 1 (normal completion) requires ALL of the following:
-1) minimum contact details are captured (name/company and at least one reliable contact method),
-2) caller explicitly indicates closure in recent user turns (examples: "goodbye", "that's all", "no more questions", "thank you bye", "you can end the call"),
-3) conversation state is clearly closing from both sides.
-Do NOT treat weak replies like only "yes", "ok", or "no" as closure.
-Do NOT approve rule_1 while caller is still asking scheduling/availability/details questions.
-
-Rule 2: sales/vendor solicitation caller is pushy after refusal.
-Rule 3: unrelated/off-topic caller is pushy after refusal.
-
+Rules on how to decide. 
+If the assistant has said have a nice day and the user has no more requests.
+In some cases the call can be a sales call from the user or user is not being serious or asking things that are not related to our busines which is web design , digital  marketing , developement and ai agents.
+In this cases return end_call=1
 If uncertain, return end_call=0.
-Do not optimize for speed; optimize for correct end/no-end decision.
+
 
 Output JSON fields:
 - end_call: integer (0 or 1)
-- matched_rule: one of ["rule_1","rule_2","rule_3","none"]
-- decision_reason: short explanation
-- confidence: number between 0 and 1
 """.strip()
 
     body = {
@@ -223,18 +206,4 @@ Output JSON fields:
 
     end_call_val = parsed.get("end_call", 0)
     end_call = 1 if str(end_call_val).strip().lower() in ("1", "true", "yes") else 0
-    matched_rule = str(parsed.get("matched_rule", "none") or "none").strip() or "none"
-    if matched_rule not in ("rule_1", "rule_2", "rule_3", "none"):
-        matched_rule = "none"
-    reason = str(parsed.get("decision_reason", "") or "").strip() or "no_reason"
-    try:
-        confidence = float(parsed.get("confidence", 0.0) or 0.0)
-    except Exception:
-        confidence = 0.0
-    confidence = max(0.0, min(1.0, confidence))
-    return {
-        "end_call": end_call,
-        "matched_rule": matched_rule,
-        "decision_reason": reason,
-        "confidence": confidence,
-    }
+    return {"end_call": end_call}

@@ -7,19 +7,35 @@ from urllib import parse, request
 from urllib.error import HTTPError
 from zoneinfo import ZoneInfo
 
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
-GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN", "")
-GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "")
+def _env(name: str, default: str = "") -> str:
+    return (os.getenv(name, default) or "").strip()
 
-BUSINESS_TIMEZONE = os.getenv("BUSINESS_TIMEZONE", "Europe/Budapest")
-BUSINESS_HOURS = os.getenv("BUSINESS_HOURS", "09:00-17:00")
-BUSINESS_DAYS = os.getenv("BUSINESS_DAYS", "1,2,3,4,5")
+
+GOOGLE_CLIENT_ID = _env("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = _env("GOOGLE_CLIENT_SECRET")
+GOOGLE_REFRESH_TOKEN = _env("GOOGLE_REFRESH_TOKEN")
+GOOGLE_CALENDAR_ID = _env("GOOGLE_CALENDAR_ID")
+
+BUSINESS_TIMEZONE = _env("BUSINESS_TIMEZONE", "Europe/Budapest")
+BUSINESS_HOURS = _env("BUSINESS_HOURS", "09:00-17:00")
+BUSINESS_DAYS = _env("BUSINESS_DAYS", "1,2,3,4,5")
 MEETING_ENFORCE_BUSY_RECHECK = (
     os.getenv("MEETING_ENFORCE_BUSY_RECHECK", "false").strip().lower() == "true"
 )
 
 logger = logging.getLogger("google_calendar")
+
+
+def _http_error_details(error: HTTPError) -> str:
+    body = ""
+    try:
+        body = error.read().decode("utf-8")
+    except Exception:
+        body = ""
+    body = body.strip()
+    if body:
+        return f"HTTP {error.code} {body}"
+    return f"HTTP {error.code} {error.reason}"
 
 
 def _iso(dt: datetime) -> str:
@@ -70,8 +86,18 @@ def _get_access_token() -> str:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
-    with request.urlopen(req, timeout=20) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
+    try:
+        with request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except HTTPError as e:
+        details = _http_error_details(e)
+        logger.error(
+            "[CALENDAR auth] token refresh failed client_id_present=%s refresh_present=%s details=%s",
+            bool(GOOGLE_CLIENT_ID),
+            bool(GOOGLE_REFRESH_TOKEN),
+            details,
+        )
+        raise RuntimeError(f"Google token refresh failed: {details}") from e
     token = payload.get("access_token")
     if not token:
         raise RuntimeError(f"Failed to refresh Google access token: {payload}")
@@ -100,12 +126,15 @@ def _get_busy_blocks(time_min: datetime, time_max: datetime) -> List[Tuple[datet
         with request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except HTTPError as e:
-        body = ""
-        try:
-            body = e.read().decode("utf-8")
-        except Exception:
-            body = ""
-        raise RuntimeError(f"Google freeBusy failed: HTTP {e.code} {body}") from e
+        details = _http_error_details(e)
+        logger.error(
+            "[CALENDAR freebusy] failed calendar_id=%s time_min=%s time_max=%s details=%s",
+            GOOGLE_CALENDAR_ID,
+            payload["timeMin"],
+            payload["timeMax"],
+            details,
+        )
+        raise RuntimeError(f"Google freeBusy failed: {details}") from e
     busy = data.get("calendars", {}).get(GOOGLE_CALENDAR_ID, {}).get("busy", [])
     blocks: List[Tuple[datetime, datetime]] = []
     for item in busy:

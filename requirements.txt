@@ -13,3 +13,4 @@ SQLAlchemy>=2.0,<3.0
 alembic>=1.13,<2.0
 psycopg[binary]>=3.2,<4.0
 cryptography>=42.0,<44.0
+itsdangerous>=2.2,<3.0

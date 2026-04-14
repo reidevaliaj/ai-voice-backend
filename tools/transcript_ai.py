@@ -58,41 +58,38 @@ def analyze_transcript(
     messages: List[Dict[str, Any]],
     current_time_utc_iso: str = "",
     business_timezone: str = "Europe/Budapest",
+    business_context: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     result = _fallback_result()
-    if not transcript.strip():
-        return result
-    if not OPENAI_API_KEY:
-        logger.warning("OPENAI_API_KEY missing, using fallback transcript analysis")
+    if not transcript.strip() or not OPENAI_API_KEY:
         return result
 
     system_prompt = """
-You are a call-analysis engine for an AI receptionist.
+You are a call-analysis engine for a multi-tenant AI receptionist.
 Return STRICT JSON only.
 
 Goals:
 1) Extract key information from the transcript.
-2) Decide which tools should run:
-   - meeting_requested: true only if caller asked for a meeting/call scheduling.
-   - case_reported: true only if caller reported an issue/problem with an existing product/service.
-3) Always provide a concise summary.
+2) Decide which tools should run.
+3) Respect the tenant business context when deciding whether the call was a sales lead, support issue, vendor/sales solicitation, or unrelated.
+4) Always provide a concise summary.
 
-Important extraction rules:
+Extraction rules:
 - Caller email may be spoken informally, e.g. "rei aliaj at hotmail dot com".
 - Normalize such spoken email into a valid email string when possible.
 - If uncertain, return empty string.
 - Do not invent facts not present in the transcript.
 
+Meeting rules:
+- Set meeting_confirmed=true only if the caller and assistant clearly agreed a specific meeting date+time.
+- If confirmed, provide meeting_start_iso and meeting_end_iso as ISO8601 with timezone offset.
+- If time is mentioned without timezone, assume the tenant business timezone.
+- If no confirmed concrete time, keep meeting_confirmed=false and leave ISO fields empty.
+
 Required JSON fields:
 summary, caller_name, company, contact_email, contact_phone, call_intent, meeting_requested, case_reported,
 meeting_reason, meeting_confirmed, meeting_start_iso, meeting_end_iso, meeting_timezone,
 case_reason, preferred_time_window, problem_description, confidence
-
-Meeting extraction rules:
-- Set meeting_confirmed=true only if the caller and assistant clearly agreed a specific meeting date+time.
-- If confirmed, provide meeting_start_iso and meeting_end_iso as ISO8601 with timezone offset.
-- If time is mentioned without timezone, assume business timezone.
-- If no confirmed concrete time, keep meeting_confirmed=false and leave ISO fields empty.
 """.strip()
 
     user_payload = {
@@ -100,6 +97,7 @@ Meeting extraction rules:
         "messages": messages,
         "current_time_utc_iso": current_time_utc_iso,
         "business_timezone": business_timezone,
+        "business_context": business_context or {},
     }
 
     body = {
@@ -128,9 +126,8 @@ Meeting extraction rules:
         data = json.loads(raw)
         content = data["choices"][0]["message"]["content"]
         parsed = json.loads(content)
-        if not isinstance(parsed, dict):
-            return result
-        result.update(parsed)
+        if isinstance(parsed, dict):
+            result.update(parsed)
     except Exception:
         logger.exception("OpenAI transcript analysis failed")
         return result
@@ -142,31 +139,18 @@ Meeting extraction rules:
     return result
 
 
-def decide_call_end(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Second-layer validator for call ending.
-    Returns:
-      {
-        "end_call": 0|1
-      }
-    """
+def decide_call_end(payload: Dict[str, Any], business_context: Dict[str, Any] | None = None) -> Dict[str, Any]:
     fallback = {"end_call": 0}
     if not OPENAI_API_KEY:
-        logger.warning("OPENAI_API_KEY missing, using fallback call-end validator")
         return fallback
 
     system_prompt = """
-You are a strict validator helper for an Ai receptionist You help him by deciding to end the call or not.
+You are a strict validator helper for a multi-tenant AI receptionist.
 Return STRICT JSON only.
 
-Approve end_call=1 only when one rule is explicitly supported by evidence in transcript/messages.
-
-Rules on how to decide. 
-If the assistant has said have a nice day and the user has no more requests.
-In some cases the call can be a sales call from the user or user is not being serious or asking things that are not related to our busines which is web design , digital  marketing , developement and ai agents.
-In this cases return end_call=1
+Approve end_call=1 only when one rule is explicitly supported by the transcript/messages.
+Use the tenant business context to judge whether the caller is asking for relevant business help or something unrelated/vendor-like.
 If uncertain, return end_call=0.
-
 
 Output JSON fields:
 - end_call: integer (0 or 1)
@@ -178,7 +162,7 @@ Output JSON fields:
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            {"role": "user", "content": json.dumps({"payload": payload, "business_context": business_context or {}}, ensure_ascii=False)},
         ],
     }
 

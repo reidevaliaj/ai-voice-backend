@@ -1,0 +1,32 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="grid two">
+  <section class="panel">
+    <h1>Internal Login</h1>
+    <p class="muted">Use the bootstrap admin credentials configured on the server.</p>
+    <form method="post" action="/admin/login" class="stack">
+      <div>
+        <label>Email</label>
+        <input type="email" name="email" required />
+      </div>
+      <div>
+        <label>Password</label>
+        <input type="password" name="password" required />
+      </div>
+      <div class="actions">
+        <button type="submit">Sign In</button>
+      </div>
+    </form>
+  </section>
+  <section class="panel">
+    <h2>What this dashboard controls</h2>
+    <ul>
+      <li>Create and launch new tenants without cloning the agent.</li>
+      <li>Route numbers to the right tenant configuration.</li>
+      <li>Edit prompts, greetings, hours, and tool settings.</li>
+      <li>Store calendar, Zoom, and email integrations per tenant.</li>
+      <li>Inspect recent call and SIP telemetry by tenant.</li>
+    </ul>
+  </section>
+</div>
+{% endblock %}

@@ -1,24 +1,47 @@
 import base64
 import json
 import logging
-import os
 import time
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 from urllib import parse, request
 from urllib.error import HTTPError
 
 logger = logging.getLogger("zoom_meetings")
 
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(exist_ok=True)
-ZOOM_TOKEN_FILE = DATA_DIR / "zoom_tokens.json"
 
-CLIENT_ID_ZOOM = (os.getenv("CLIENT_ID_ZOOM", "") or "").strip()
-CLIENT_SECRET_ZOOM = (os.getenv("CLIENT_SECRET_ZOOM", "") or "").strip()
-ZOOM_TOKEN_URL = (os.getenv("ZOOM_TOKEN_URL", "https://zoom.us/oauth/token") or "").strip()
-ZOOM_OWNER_EMAIL = (os.getenv("ZOOM_OWNER_EMAIL", "aliajrei@gmail.com") or "").strip()
+class ZoomContext:
+    def __init__(self, credentials: dict[str, Any], settings: dict[str, Any] | None = None):
+        creds = dict(credentials or {})
+        options = dict(settings or {})
+        self.client_id = str(creds.get("client_id") or "").strip()
+        self.client_secret = str(creds.get("client_secret") or "").strip()
+        self.token_url = str(creds.get("token_url") or "https://zoom.us/oauth/token").strip()
+        self.access_token = str(creds.get("access_token") or "").strip()
+        self.refresh_token = str(creds.get("refresh_token") or "").strip()
+        self.api_url = str(creds.get("api_url") or "https://api.zoom.us").strip().rstrip("/")
+        self.expires_in = int(creds.get("expires_in") or 0)
+        self.saved_at_unix = int(creds.get("saved_at_unix") or 0)
+        self.owner_email = str(options.get("owner_email") or "").strip()
+
+    def export_credentials(self, tokens: dict[str, Any] | None = None) -> dict[str, Any]:
+        current = dict(tokens or {})
+        if not current:
+            current = {
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "token_url": self.token_url,
+                "access_token": self.access_token,
+                "refresh_token": self.refresh_token,
+                "api_url": self.api_url,
+                "expires_in": self.expires_in,
+                "saved_at_unix": self.saved_at_unix,
+            }
+        current.setdefault("client_id", self.client_id)
+        current.setdefault("client_secret", self.client_secret)
+        current.setdefault("token_url", self.token_url)
+        current.setdefault("api_url", self.api_url)
+        return current
 
 
 def _parse_iso(value: str) -> datetime:
@@ -30,49 +53,22 @@ def _parse_iso(value: str) -> datetime:
     return datetime.fromisoformat(v)
 
 
-def _load_token_store() -> Dict[str, Any]:
-    if not ZOOM_TOKEN_FILE.exists():
-        raise RuntimeError("Zoom token file not found. Complete /zoom/setup first.")
-    data = json.loads(ZOOM_TOKEN_FILE.read_text(encoding="utf-8"))
-    if "zoom_tokens" not in data:
-        raise RuntimeError("Zoom token file is invalid")
-    return data
-
-
-def _save_token_store(tokens: Dict[str, Any]) -> None:
-    payload = {
-        "saved_at_unix": int(time.time()),
-        "saved_at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "zoom_tokens": tokens,
-    }
-    ZOOM_TOKEN_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def _is_expired(store: Dict[str, Any], skew_seconds: int = 60) -> bool:
-    saved_at = int(store.get("saved_at_unix", 0))
-    expires_in = int(store.get("zoom_tokens", {}).get("expires_in", 0))
-    if not saved_at or not expires_in:
+def _is_expired(context: ZoomContext, skew_seconds: int = 60) -> bool:
+    if not context.access_token or not context.saved_at_unix or not context.expires_in:
         return True
-    return time.time() >= (saved_at + expires_in - skew_seconds)
+    return time.time() >= (context.saved_at_unix + context.expires_in - skew_seconds)
 
 
-def _refresh_tokens(store: Dict[str, Any]) -> Dict[str, Any]:
-    if not CLIENT_ID_ZOOM or not CLIENT_SECRET_ZOOM:
-        raise RuntimeError("CLIENT_ID_ZOOM/CLIENT_SECRET_ZOOM missing")
+def _refresh_tokens(context: ZoomContext) -> dict[str, Any]:
+    if not context.client_id or not context.client_secret:
+        raise RuntimeError("Zoom client_id/client_secret missing")
+    if not context.refresh_token:
+        raise RuntimeError("Zoom refresh_token missing")
 
-    refresh_token = str(store.get("zoom_tokens", {}).get("refresh_token", "")).strip()
-    if not refresh_token:
-        raise RuntimeError("Zoom refresh_token missing in token file")
-
-    basic = base64.b64encode(f"{CLIENT_ID_ZOOM}:{CLIENT_SECRET_ZOOM}".encode("utf-8")).decode("utf-8")
-    body = parse.urlencode(
-        {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        }
-    ).encode("utf-8")
+    basic = base64.b64encode(f"{context.client_id}:{context.client_secret}".encode("utf-8")).decode("utf-8")
+    body = parse.urlencode({"grant_type": "refresh_token", "refresh_token": context.refresh_token}).encode("utf-8")
     req = request.Request(
-        ZOOM_TOKEN_URL,
+        context.token_url,
         data=body,
         headers={
             "Authorization": f"Basic {basic}",
@@ -84,34 +80,24 @@ def _refresh_tokens(store: Dict[str, Any]) -> Dict[str, Any]:
         refreshed = json.loads(resp.read().decode("utf-8"))
     if "access_token" not in refreshed:
         raise RuntimeError(f"Zoom token refresh failed: {refreshed}")
-    _save_token_store(refreshed)
-    logger.info("[ZOOM] token refreshed successfully")
+    refreshed["client_id"] = context.client_id
+    refreshed["client_secret"] = context.client_secret
+    refreshed["token_url"] = context.token_url
+    refreshed.setdefault("api_url", context.api_url)
+    refreshed["saved_at_unix"] = int(time.time())
     return refreshed
 
 
-def _valid_access_token() -> Dict[str, Any]:
-    store = _load_token_store()
-    if _is_expired(store):
-        tokens = _refresh_tokens(store)
-        return tokens
-    return store["zoom_tokens"]
+def _valid_access_token(context: ZoomContext) -> Tuple[dict[str, Any], dict[str, Any] | None]:
+    if _is_expired(context):
+        refreshed = _refresh_tokens(context)
+        return refreshed, refreshed
+    return context.export_credentials(), None
 
 
-def _zoom_api_base(tokens: Dict[str, Any]) -> str:
-    api_url = str(tokens.get("api_url", "")).strip()
-    if api_url:
-        return api_url.rstrip("/")
-    return "https://api.zoom.us"
-
-
-def _post_zoom_meeting(tokens: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
-    access_token = str(tokens.get("access_token", "")).strip()
-    if not access_token:
-        raise RuntimeError("Zoom access_token missing")
-
-    url = f"{_zoom_api_base(tokens)}/v2/users/me/meetings"
+def _post_zoom_meeting(access_token: str, api_url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     req = request.Request(
-        url,
+        f"{api_url.rstrip('/')}/v2/users/me/meetings",
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {access_token}",
@@ -130,17 +116,20 @@ def create_zoom_meeting(
     agenda: str,
     client_email: str = "",
     timezone_name: str = "Europe/Budapest",
+    context: ZoomContext | None = None,
 ) -> Dict[str, Any]:
+    if context is None:
+        raise RuntimeError("Zoom context is required")
     start_dt = _parse_iso(start_iso)
     end_dt = _parse_iso(end_iso)
     duration = int((end_dt - start_dt).total_seconds() // 60)
     if duration <= 0:
         duration = 30
 
-    invitees: List[str] = [ZOOM_OWNER_EMAIL]
+    invitees: List[str] = [context.owner_email] if context.owner_email else []
     if client_email.strip():
         invitees.append(client_email.strip())
-    invitees = [e for e in dict.fromkeys(invitees) if "@" in e]
+    invitees = [email for email in dict.fromkeys(invitees) if "@" in email]
 
     payload = {
         "topic": topic[:180] if topic else "Client Meeting",
@@ -154,35 +143,52 @@ def create_zoom_meeting(
             "participant_video": True,
             "join_before_host": False,
             "waiting_room": True,
-            # Best-effort; some Zoom account/app setups may ignore this.
-            "meeting_invitees": [{"email": e} for e in invitees],
+            "meeting_invitees": [{"email": email} for email in invitees],
         },
     }
 
-    tokens = _valid_access_token()
+    tokens, updated_credentials = _valid_access_token(context)
     try:
-        created = _post_zoom_meeting(tokens, payload)
-    except HTTPError as e:
+        created = _post_zoom_meeting(str(tokens.get("access_token") or ""), str(tokens.get("api_url") or context.api_url), payload)
+    except HTTPError as exc:
         body = ""
         try:
-            body = e.read().decode("utf-8")
+            body = exc.read().decode("utf-8")
         except Exception:
             body = ""
-        # Retry once after refresh on auth failures.
-        if e.code in (401, 403):
-            logger.warning("[ZOOM] create meeting failed auth-like status=%s, retrying after refresh", e.code)
-            refreshed = _refresh_tokens({"zoom_tokens": tokens})
-            created = _post_zoom_meeting(refreshed, payload)
+        if exc.code in (401, 403):
+            refreshed = _refresh_tokens(context)
+            updated_credentials = refreshed
+            created = _post_zoom_meeting(str(refreshed.get("access_token") or ""), str(refreshed.get("api_url") or context.api_url), payload)
         else:
-            raise RuntimeError(f"Zoom create meeting failed: HTTP {e.code} {body}") from e
+            raise RuntimeError(f"Zoom create meeting failed: HTTP {exc.code} {body}") from exc
 
-    result = {
+    return {
         "created": True,
         "meeting_id": created.get("id"),
         "join_url": created.get("join_url"),
         "start_url": created.get("start_url"),
         "password": created.get("password"),
         "invitees": invitees,
+        "updated_credentials": updated_credentials,
     }
-    logger.info("[ZOOM] meeting created id=%s invitees=%s", result["meeting_id"], len(invitees))
-    return result
+
+
+def validate_zoom_context(context: ZoomContext) -> Dict[str, Any]:
+    tokens, updated = _valid_access_token(context)
+    access_token = str(tokens.get("access_token") or "")
+    if not access_token:
+        raise RuntimeError("Zoom access token missing")
+    req = request.Request(
+        f"{str(tokens.get('api_url') or context.api_url).rstrip('/')}/v2/users/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+        method="GET",
+    )
+    with request.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return {
+        "ok": True,
+        "email": data.get("email"),
+        "display_name": data.get("display_name"),
+        "updated_credentials": updated,
+    }

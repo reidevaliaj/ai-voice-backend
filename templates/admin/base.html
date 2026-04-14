@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ page_title }}</title>
+    <style>
+      :root {
+        --bg: #f6f2ea;
+        --panel: #fffdf8;
+        --ink: #1f2933;
+        --muted: #5b6772;
+        --line: #e6ded1;
+        --accent: #0f766e;
+        --accent-2: #124e78;
+        --danger: #b42318;
+        --success: #027a48;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        background: radial-gradient(circle at top, #fff7ec 0%, var(--bg) 55%, #ece5d8 100%);
+        color: var(--ink);
+      }
+      .shell {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      .topbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 24px;
+      }
+      .brand {
+        font-size: 28px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      .muted { color: var(--muted); }
+      .flash {
+        padding: 14px 16px;
+        border-radius: 14px;
+        margin-bottom: 18px;
+        border: 1px solid var(--line);
+        background: #fff;
+      }
+      .flash.success { border-color: #86efac; color: var(--success); }
+      .flash.error { border-color: #fca5a5; color: var(--danger); }
+      .grid {
+        display: grid;
+        gap: 18px;
+      }
+      .grid.two { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+      .grid.three { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 20px;
+        box-shadow: 0 10px 30px rgba(31, 41, 51, 0.06);
+      }
+      h1, h2, h3 { margin-top: 0; }
+      label { display: block; font-size: 14px; margin-bottom: 6px; color: var(--muted); }
+      input, textarea, select {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid #cfd8dc;
+        background: #fff;
+        font: inherit;
+      }
+      textarea { min-height: 120px; resize: vertical; }
+      .row { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+      .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+      button, .button {
+        appearance: none;
+        border: none;
+        border-radius: 999px;
+        background: var(--accent);
+        color: white;
+        padding: 11px 16px;
+        font: inherit;
+        cursor: pointer;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .button.secondary, button.secondary { background: var(--accent-2); }
+      .button.ghost, button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+      .pill { display: inline-block; padding: 4px 10px; border-radius: 999px; background: #ecfdf3; color: var(--success); font-size: 13px; }
+      .pill.warn { background: #fff4e5; color: #b54708; }
+      .pill.error { background: #fef3f2; color: var(--danger); }
+      table { width: 100%; border-collapse: collapse; font-size: 14px; }
+      th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+      code, pre {
+        font-family: Consolas, Monaco, monospace;
+        background: #f7f7f7;
+        border-radius: 12px;
+      }
+      pre { padding: 14px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+      .stack > * + * { margin-top: 14px; }
+      .checkboxes { display: flex; flex-wrap: wrap; gap: 12px; }
+      .checkboxes label { display: inline-flex; align-items: center; gap: 8px; margin: 0; color: var(--ink); }
+      .checkboxes input { width: auto; }
+      @media (max-width: 640px) {
+        .shell { padding: 16px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="topbar">
+        <div>
+          <div class="brand">AI Voice Control</div>
+          <div class="muted">Multi-tenant receptionist control plane</div>
+        </div>
+        {% if request.session.get('admin_user_id') %}
+        <form method="post" action="/admin/logout">
+          <button type="submit" class="ghost">Logout</button>
+        </form>
+        {% endif %}
+      </div>
+      {% if flash %}
+      <div class="flash {{ flash.level }}">{{ flash.message }}</div>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </div>
+  </body>
+</html>

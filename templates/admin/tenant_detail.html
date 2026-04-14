@@ -1,0 +1,229 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="actions" style="margin-bottom: 18px;">
+  <a class="button ghost" href="/admin">Back to Dashboard</a>
+</div>
+
+<div class="grid two">
+  <section class="panel">
+    <h1>{{ tenant.display_name }}</h1>
+    <p class="muted">slug: <code>{{ tenant.slug }}</code></p>
+    <p class="muted">status: <span class="pill">{{ tenant.status }}</span></p>
+    <p>{{ tenant.notes or 'No internal notes yet.' }}</p>
+    {% if config %}
+    <p class="muted">Active config version <strong>{{ config.version }}</strong></p>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Phone Routing</h2>
+    <form method="post" action="/admin/tenants/{{ tenant.slug }}/phone-numbers" class="stack">
+      <div class="row">
+        <div>
+          <label>Phone Number</label>
+          <input type="text" name="phone_number" placeholder="+18382215361" required />
+        </div>
+        <div>
+          <label>Label</label>
+          <input type="text" name="label" value="primary" />
+        </div>
+      </div>
+      <div class="actions">
+        <button type="submit">Save Number</button>
+      </div>
+    </form>
+    <table>
+      <thead><tr><th>Number</th><th>Label</th><th>Status</th></tr></thead>
+      <tbody>
+        {% for item in phone_numbers %}
+        <tr><td><code>{{ item.phone_number }}</code></td><td>{{ item.label }}</td><td>{{ item.status }}</td></tr>
+        {% else %}
+        <tr><td colspan="3" class="muted">No numbers assigned yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Agent Configuration</h2>
+  <form method="post" action="/admin/tenants/{{ tenant.slug }}/config" class="stack">
+    <div class="row">
+      <div>
+        <label>Business Name</label>
+        <input type="text" name="business_name" value="{{ config_form.business_name }}" required />
+      </div>
+      <div>
+        <label>Timezone</label>
+        <input type="text" name="timezone" value="{{ config_form.timezone }}" required />
+      </div>
+    </div>
+    <div>
+      <label>Greeting</label>
+      <textarea name="greeting">{{ config_form.greeting }}</textarea>
+    </div>
+    <div>
+      <label>Services (one per line)</label>
+      <textarea name="services">{{ config_form.services }}</textarea>
+    </div>
+    <div>
+      <label>FAQ / Business Notes</label>
+      <textarea name="faq_notes">{{ config_form.faq_notes }}</textarea>
+    </div>
+    <div>
+      <label>Prompt Appendix</label>
+      <textarea name="prompt_appendix">{{ config_form.prompt_appendix }}</textarea>
+    </div>
+    <div class="row">
+      <div>
+        <label>Business Hours</label>
+        <input type="text" name="business_hours" value="{{ config_form.business_hours }}" />
+      </div>
+      <div>
+        <label>Business Days</label>
+        <input type="text" name="business_days" value="{{ config_form.business_days }}" />
+      </div>
+      <div>
+        <label>Meeting Duration (minutes)</label>
+        <input type="number" name="meeting_duration_minutes" value="{{ config_form.meeting_duration_minutes }}" />
+      </div>
+      <div>
+        <label>Booking Horizon (days)</label>
+        <input type="number" name="booking_horizon_days" value="{{ config_form.booking_horizon_days }}" />
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>LLM Model</label>
+        <input type="text" name="llm_model" value="{{ config_form.llm_model }}" />
+      </div>
+      <div>
+        <label>TTS Voice</label>
+        <input type="text" name="tts_voice" value="{{ config_form.tts_voice }}" />
+      </div>
+      <div>
+        <label>Owner Name</label>
+        <input type="text" name="owner_name" value="{{ config_form.owner_name }}" />
+      </div>
+      <div>
+        <label>Owner Email</label>
+        <input type="text" name="owner_email" value="{{ config_form.owner_email }}" />
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Reply-To Email</label>
+        <input type="text" name="reply_to_email" value="{{ config_form.reply_to_email }}" />
+      </div>
+      <div>
+        <label>From Email</label>
+        <input type="text" name="from_email" value="{{ config_form.from_email }}" />
+      </div>
+      <div>
+        <label>Notification Targets (one per line)</label>
+        <textarea name="notification_targets">{{ config_form.notification_targets }}</textarea>
+      </div>
+      <div>
+        <label>Extra Settings JSON</label>
+        <textarea name="extra_settings">{{ config_form.extra_settings }}</textarea>
+      </div>
+    </div>
+    <div>
+      <label>Enabled Tools</label>
+      <div class="checkboxes">
+        <label><input type="checkbox" name="tool_email_summary" {% if config_form.enabled_tools.email_summary %}checked{% endif %} /> Email Summary</label>
+        <label><input type="checkbox" name="tool_meeting_creation" {% if config_form.enabled_tools.meeting_creation %}checked{% endif %} /> Meeting Creation</label>
+        <label><input type="checkbox" name="tool_case_creation" {% if config_form.enabled_tools.case_creation %}checked{% endif %} /> Case Creation</label>
+        <label><input type="checkbox" name="tool_calendar_lookup" {% if config_form.enabled_tools.calendar_lookup %}checked{% endif %} /> Calendar Lookup</label>
+        <label><input type="checkbox" name="tool_zoom_meetings" {% if config_form.enabled_tools.zoom_meetings %}checked{% endif %} /> Zoom Meetings</label>
+      </div>
+    </div>
+    <div class="actions">
+      <button type="submit">Save New Config Version</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Integrations</h2>
+  <div class="grid three">
+    {% for provider, summary in integration_summary.items() %}
+    <article class="panel">
+      <h3>{{ provider }}</h3>
+      <p>
+        {% if summary.status == 'active' %}
+        <span class="pill">active</span>
+        {% elif summary.status == 'error' %}
+        <span class="pill error">error</span>
+        {% else %}
+        <span class="pill warn">{{ summary.status }}</span>
+        {% endif %}
+      </p>
+      <p class="muted">Last validated: {{ summary.last_validated_at or 'never' }}</p>
+      {% if summary.last_error %}<p class="muted">Last error: {{ summary.last_error }}</p>{% endif %}
+      <form method="post" action="/admin/tenants/{{ tenant.slug }}/integrations/{{ provider }}" class="stack">
+        <div>
+          <label>Status</label>
+          <input type="text" name="status" value="{{ integration_forms[provider].status }}" />
+        </div>
+        <div>
+          <label>Credentials JSON</label>
+          <textarea name="credentials">{{ integration_forms[provider].credentials }}</textarea>
+        </div>
+        <div>
+          <label>Settings JSON</label>
+          <textarea name="settings">{{ integration_forms[provider].settings }}</textarea>
+        </div>
+        <div class="actions">
+          <button type="submit">Save {{ provider }}</button>
+        </div>
+      </form>
+      <form method="post" action="/admin/tenants/{{ tenant.slug }}/integrations/{{ provider }}/validate" class="actions">
+        <button type="submit" class="secondary">Validate</button>
+      </form>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Runtime Snapshot</h2>
+  {% if runtime %}
+  <pre>{{ runtime | tojson(indent=2) }}</pre>
+  {% else %}
+  <p class="muted">No runtime config available.</p>
+  {% endif %}
+</section>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Recent Call Events</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Created</th>
+        <th>Type</th>
+        <th>Call SID</th>
+        <th>Status</th>
+        <th>Room</th>
+        <th>Caller</th>
+        <th>Called</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for event in recent_events %}
+      <tr>
+        <td>{{ event.created_at }}</td>
+        <td>{{ event.event_type }}</td>
+        <td><code>{{ event.call_sid or event.parent_call_sid }}</code></td>
+        <td>{{ event.call_status }}</td>
+        <td>{{ event.room_name }}</td>
+        <td>{{ event.caller_number }}</td>
+        <td>{{ event.called_number }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">No call events yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

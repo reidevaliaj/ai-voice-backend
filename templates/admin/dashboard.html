@@ -1,0 +1,69 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="grid two">
+  <section class="panel">
+    <h1>Create Tenant</h1>
+    <form method="post" action="/admin/tenants" class="stack">
+      <div class="row">
+        <div>
+          <label>Slug</label>
+          <input type="text" name="slug" placeholder="acme" required />
+        </div>
+        <div>
+          <label>Display Name</label>
+          <input type="text" name="display_name" placeholder="Acme Studio" required />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Primary Inbound Number</label>
+          <input type="text" name="phone_number" placeholder="+18382215361" />
+        </div>
+        <div>
+          <label>Notes</label>
+          <input type="text" name="notes" placeholder="Internal notes" />
+        </div>
+      </div>
+      <div class="actions">
+        <button type="submit">Create Tenant</button>
+      </div>
+    </form>
+  </section>
+  <section class="panel">
+    <h2>Deploy Context</h2>
+    <p class="muted">Public base URL: {{ public_base_url }}</p>
+    <p class="muted">Each tenant gets one number in v1 and shares the same backend and LiveKit agent deployment.</p>
+  </section>
+</div>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Tenants</h2>
+  <div class="grid three">
+    {% for card in tenant_cards %}
+    <article class="panel">
+      <h3>{{ card.tenant.display_name }}</h3>
+      <p class="muted">slug: <code>{{ card.tenant.slug }}</code></p>
+      <p>
+        {% if card.config %}
+        <span class="pill">v{{ card.config.version }}</span>
+        {% else %}
+        <span class="pill warn">No config</span>
+        {% endif %}
+      </p>
+      <p class="muted">Numbers:
+        {% if card.phone_numbers %}
+          {% for number in card.phone_numbers %}
+            <code>{{ number.phone_number }}</code>{% if not loop.last %}, {% endif %}
+          {% endfor %}
+        {% else %}
+          none yet
+        {% endif %}
+      </p>
+      <div class="actions">
+        <a class="button secondary" href="/admin/tenants/{{ card.tenant.slug }}">Open Tenant</a>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

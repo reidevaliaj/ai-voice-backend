@@ -196,6 +196,27 @@
 </section>
 
 <section class="panel" style="margin-top: 18px;">
+  <h2>Live Call Debug</h2>
+  <p class="muted">Auto-refreshes while you keep this page open. Source: <code id="agent-debug-path">{{ agent_debug_log.path }}</code></p>
+  <pre id="agent-debug-log">{{ agent_debug_log.content or 'No live debug log content yet.' }}</pre>
+</section>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Agent Runtime Log</h2>
+  <p class="muted">Useful if the worker itself has startup or runtime issues. Source: <code id="agent-runtime-path">{{ agent_runtime_log.path }}</code></p>
+  <pre id="agent-runtime-log">{{ agent_runtime_log.content or 'No agent runtime log content yet.' }}</pre>
+</section>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Recent Email Summary Events</h2>
+  {% if recent_email_events %}
+  <pre id="recent-email-events">{{ recent_email_events | tojson(indent=2) }}</pre>
+  {% else %}
+  <p class="muted" id="recent-email-events">No email summary events logged yet.</p>
+  {% endif %}
+</section>
+
+<section class="panel" style="margin-top: 18px;">
   <h2>Recent Call Events</h2>
   <table>
     <thead>
@@ -226,4 +247,42 @@
     </tbody>
   </table>
 </section>
+
+<script>
+  (function () {
+    const debugUrl = "/admin/tenants/{{ tenant.slug }}/debug-log";
+    const debugLog = document.getElementById("agent-debug-log");
+    const runtimeLog = document.getElementById("agent-runtime-log");
+    const emailEvents = document.getElementById("recent-email-events");
+    const debugPath = document.getElementById("agent-debug-path");
+    const runtimePath = document.getElementById("agent-runtime-path");
+
+    async function refreshDebug() {
+      try {
+        const response = await fetch(debugUrl, { headers: { "X-Requested-With": "fetch" } });
+        if (!response.ok) {
+          return;
+        }
+        const payload = await response.json();
+        if (payload.agent_debug_log) {
+          debugLog.textContent = payload.agent_debug_log.content || "No live debug log content yet.";
+          debugPath.textContent = payload.agent_debug_log.path || "";
+        }
+        if (payload.agent_runtime_log) {
+          runtimeLog.textContent = payload.agent_runtime_log.content || "No agent runtime log content yet.";
+          runtimePath.textContent = payload.agent_runtime_log.path || "";
+        }
+        if (payload.recent_email_events) {
+          emailEvents.textContent = payload.recent_email_events.length
+            ? JSON.stringify(payload.recent_email_events, null, 2)
+            : "No email summary events logged yet.";
+        }
+      } catch (error) {
+        console.error("Failed to refresh debug log", error);
+      }
+    }
+
+    setInterval(refreshDebug, 3000);
+  })();
+</script>
 {% endblock %}

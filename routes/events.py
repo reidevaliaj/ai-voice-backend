@@ -171,8 +171,11 @@ def _send_email_summary(payload: TranscriptPayload, analysis: Dict[str, Any], ru
     config = runtime["config"]
     email_settings = runtime["integrations"]["email"].get("settings") or {}
     targets = list(email_settings.get("notification_targets") or config.get("notification_targets") or [])
+    owner_email = str(config.get("owner_email") or "").strip()
+    if owner_email and owner_email not in targets:
+        targets.append(owner_email)
     if not targets:
-        targets = [config.get("owner_email")]
+        targets = [owner_email] if owner_email else []
     subject = f"[AI Voice] {config['business_name']} call summary - {analysis.get('call_intent') or 'other'}"
     html = f"""
     <h3>Call Summary</h3>
@@ -194,15 +197,40 @@ def _send_email_summary(payload: TranscriptPayload, analysis: Dict[str, Any], ru
     <p><b>Full transcript:</b></p>
     <p>{_to_html(payload.transcript)}</p>
     """
+    sent_to: list[str] = []
+    send_results: list[dict[str, Any]] = []
+    from_email = str(email_settings.get("from_email") or config.get("from_email") or config.get("owner_email") or "noreply@example.com")
+    reply_to = str(email_settings.get("reply_to_email") or config.get("reply_to_email") or config.get("owner_email") or "")
     for target in [item for item in targets if item]:
-        send_email_resend(
+        result = send_email_resend(
             to=target,
             subject=subject,
             html=html,
-            from_email=str(email_settings.get("from_email") or config.get("from_email") or config.get("owner_email") or "noreply@example.com"),
-            reply_to=str(email_settings.get("reply_to_email") or config.get("reply_to_email") or config.get("owner_email") or ""),
+            from_email=from_email,
+            reply_to=reply_to,
             tags=[{"name": "tool", "value": "email-summary"}],
         )
+        sent_to.append(target)
+        send_results.append({"to": target, "result": result})
+    append_event(
+        "email_summary_events.jsonl",
+        {
+            "tenant_id": payload.tenant_id,
+            "room_name": payload.room_name,
+            "timestamp": payload.timestamp,
+            "subject": subject,
+            "from_email": from_email,
+            "reply_to": reply_to,
+            "targets": sent_to,
+            "results": send_results,
+        },
+    )
+    logger.info(
+        "[TOOL email-summary] sent tenant=%s room=%s targets=%s",
+        runtime["tenant"]["slug"],
+        payload.room_name,
+        sent_to,
+    )
 
 
 def _run_meeting_creation(db: Session, payload: TranscriptPayload, analysis: Dict[str, Any], runtime: dict[str, Any]) -> None:

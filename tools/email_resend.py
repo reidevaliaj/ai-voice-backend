@@ -1,8 +1,11 @@
 import os
+import logging
 from typing import Optional, List, Dict, Any
 import resend
 from dotenv import load_dotenv
 load_dotenv()
+
+logger = logging.getLogger("email_resend")
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 if RESEND_API_KEY:
@@ -38,4 +41,17 @@ def send_email_resend(
     if tags:
         payload["tags"] = tags
 
-    return resend.Emails.send(payload)
+    logger.info(
+        "[EMAIL resend] sending to=%s subject=%s from=%s",
+        to,
+        subject,
+        from_email,
+    )
+    result = resend.Emails.send(payload)
+    logger.info(
+        "[EMAIL resend] sent to=%s subject=%s result=%s",
+        to,
+        subject,
+        result,
+    )
+    return result

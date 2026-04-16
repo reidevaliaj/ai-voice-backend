@@ -1,13 +1,14 @@
 import json
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app_config import PUBLIC_BASE_URL
+from app_config import AGENT_DEBUG_LOG_PATH, AGENT_LOG_PATH, DEBUG_LOG_MAX_CHARS, PUBLIC_BASE_URL
 from db import get_db
 from models import AdminUser, CallEvent, Tenant, TenantPhoneNumber
 from security import decrypt_json, mask_secret, verify_password
@@ -25,11 +26,24 @@ from services.tenants import (
     upsert_integration,
     upsert_phone_number,
 )
+from tools.email_resend import send_email_resend
 from tools.google_calendar import CalendarContext, validate_calendar_context
 from tools.zoom_meetings import ZoomContext, validate_zoom_context
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
+
+
+def _read_log_tail(path_value: str, max_chars: int = DEBUG_LOG_MAX_CHARS) -> dict[str, Any]:
+    path = Path(path_value)
+    if not path.exists():
+        return {"path": str(path), "exists": False, "content": "", "size": 0}
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return {"path": str(path), "exists": True, "content": f"Unable to read log: {exc}", "size": 0}
+    content = raw[-max_chars:] if len(raw) > max_chars else raw
+    return {"path": str(path), "exists": True, "content": content, "size": len(raw)}
 
 
 def _flash(request: Request, level: str, message: str) -> None:
@@ -68,6 +82,28 @@ def _integration_summary(session: Session, tenant_id: str) -> dict[str, dict[str
             "last_error": payload.get("last_error", ""),
         }
     return summary
+
+
+def _latest_email_events(limit: int = 10, tenant_id: str | None = None) -> list[dict[str, Any]]:
+    path = Path("data") / "email_summary_events.jsonl"
+    if not path.exists():
+        return []
+    try:
+        lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except Exception:
+        return []
+    events: list[dict[str, Any]] = []
+    for line in reversed(lines):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if tenant_id and str(payload.get("tenant_id") or "") != tenant_id:
+            continue
+        events.append(payload)
+        if len(events) >= limit:
+            break
+    return events
 
 
 @router.get("/admin/login")
@@ -179,9 +215,29 @@ async def tenant_detail(slug: str, request: Request, db: Session = Depends(get_d
                 for provider in ("google_calendar", "zoom", "email")
             },
             "recent_events": recent_events,
+            "recent_email_events": _latest_email_events(tenant_id=tenant.id),
             "runtime": runtime,
+            "agent_debug_log": _read_log_tail(AGENT_DEBUG_LOG_PATH),
+            "agent_runtime_log": _read_log_tail(AGENT_LOG_PATH),
             "flash": _consume_flash(request),
         },
+    )
+
+
+@router.get("/admin/tenants/{slug}/debug-log")
+async def tenant_debug_log(slug: str, request: Request, db: Session = Depends(get_db)):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return JSONResponse(
+        {
+            "ok": True,
+            "tenant": tenant.slug,
+            "agent_debug_log": _read_log_tail(AGENT_DEBUG_LOG_PATH),
+            "agent_runtime_log": _read_log_tail(AGENT_LOG_PATH),
+            "recent_email_events": _latest_email_events(tenant_id=tenant.id),
+        }
     )
 
 
@@ -284,9 +340,30 @@ async def validate_integration(slug: str, provider: str, request: Request, db: S
             updated_credentials = result.pop("updated_credentials", None)
         elif provider == "email":
             settings = payload.get("settings") or {}
-            if not settings.get("from_email"):
+            from_email = str(settings.get("from_email") or "").strip()
+            reply_to = str(settings.get("reply_to_email") or "").strip()
+            targets = [item for item in settings.get("notification_targets", []) if item]
+            if not from_email:
                 raise RuntimeError("Email integration requires from_email in settings")
-            result = {"ok": True, "from_email": settings.get("from_email"), "notification_targets": settings.get("notification_targets", [])}
+            if not targets:
+                raise RuntimeError("Email integration requires at least one notification target")
+            resend_result = send_email_resend(
+                to=str(targets[0]),
+                subject=f"[AI Voice] Email validation for {tenant.display_name}",
+                html=(
+                    f"<p>This is a validation email for tenant <strong>{tenant.display_name}</strong>.</p>"
+                    f"<p>If you received this, the Resend integration is working.</p>"
+                ),
+                from_email=from_email,
+                reply_to=reply_to,
+                tags=[{"name": "tool", "value": "email-validation"}],
+            )
+            result = {
+                "ok": True,
+                "from_email": from_email,
+                "notification_target": targets[0],
+                "resend_result": resend_result,
+            }
         else:
             raise RuntimeError(f"Unsupported provider: {provider}")
 

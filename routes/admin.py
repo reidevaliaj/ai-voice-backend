@@ -24,6 +24,7 @@ from services.tenants import (
     integration_form_payload,
     normalize_assistant_language,
     normalize_phone_number,
+    normalize_tts_speed,
     parse_lines,
     supported_assistant_languages,
     upsert_integration,
@@ -187,6 +188,7 @@ async def create_tenant_action(request: Request, db: Session = Depends(get_db)):
     assistant_language = normalize_assistant_language(str(form.get("assistant_language") or "en"))
     tenant_prompt = str(form.get("tenant_prompt") or "").strip()
     tts_voice = str(form.get("tts_voice") or "").strip()
+    tts_speed = normalize_tts_speed(form.get("tts_speed"))
     if not slug or not display_name:
         _flash(request, "error", "Slug and display name are required")
         return RedirectResponse(url="/admin", status_code=303)
@@ -205,6 +207,7 @@ async def create_tenant_action(request: Request, db: Session = Depends(get_db)):
             "assistant_language": assistant_language,
             "tenant_prompt": tenant_prompt,
             "tts_voice": tts_voice,
+            "tts_speed": tts_speed,
         },
     )
     if phone_number:
@@ -346,6 +349,7 @@ async def update_tenant_config(slug: str, request: Request, db: Session = Depend
         "enabled_tools": enabled_tools,
         "llm_model": str(form.get("llm_model") or "gpt-4.1-mini").strip(),
         "tts_voice": str(form.get("tts_voice") or "").strip(),
+        "tts_speed": normalize_tts_speed(form.get("tts_speed")),
         "owner_name": str(form.get("owner_name") or "").strip(),
         "owner_email": str(form.get("owner_email") or "").strip(),
         "reply_to_email": str(form.get("reply_to_email") or "").strip(),

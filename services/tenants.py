@@ -22,6 +22,7 @@ from app_config import (
     DEFAULT_OWNER_EMAIL,
     DEFAULT_REPLY_TO_EMAIL,
     DEFAULT_TENANT_SLUG,
+    DEFAULT_TTS_SPEED,
     DEFAULT_TTS_VOICE,
     GOOGLE_CALENDAR_ID,
     GOOGLE_CLIENT_ID,
@@ -100,6 +101,14 @@ def supported_assistant_languages() -> list[dict[str, str]]:
     return [{"code": code, "label": label} for code, label in SUPPORTED_ASSISTANT_LANGUAGES]
 
 
+def normalize_tts_speed(value: Any) -> float:
+    try:
+        speed = float(value if value not in (None, "") else DEFAULT_TTS_SPEED)
+    except (TypeError, ValueError):
+        speed = DEFAULT_TTS_SPEED
+    return min(1.5, max(0.6, speed))
+
+
 def default_tenant_prompt(display_name: str) -> str:
     business = (display_name or "the business").strip() or "the business"
     return (
@@ -133,6 +142,7 @@ def default_config_payload(display_name: str = "Code Studio") -> dict[str, Any]:
         "enabled_tools": default_enabled_tools(),
         "llm_model": DEFAULT_LLM_MODEL,
         "tts_voice": DEFAULT_TTS_VOICE,
+        "tts_speed": normalize_tts_speed(DEFAULT_TTS_SPEED),
         "owner_name": "Rey",
         "owner_email": DEFAULT_OWNER_EMAIL,
         "reply_to_email": DEFAULT_REPLY_TO_EMAIL,
@@ -260,6 +270,7 @@ def create_config_version(session: Session, tenant: Tenant, payload: dict[str, A
         enabled_tools=dict(payload.get("enabled_tools") or default_enabled_tools()),
         llm_model=str(payload.get("llm_model") or DEFAULT_LLM_MODEL),
         tts_voice=str(payload.get("tts_voice") or DEFAULT_TTS_VOICE),
+        tts_speed=normalize_tts_speed(payload.get("tts_speed")),
         owner_name=str(payload.get("owner_name") or ""),
         owner_email=str(payload.get("owner_email") or DEFAULT_OWNER_EMAIL),
         reply_to_email=str(payload.get("reply_to_email") or DEFAULT_REPLY_TO_EMAIL),
@@ -379,6 +390,7 @@ def build_runtime_context(session: Session, tenant: Tenant, config_version: int 
             "enabled_tools": dict(config.enabled_tools or {}),
             "llm_model": config.llm_model,
             "tts_voice": config.tts_voice,
+            "tts_speed": normalize_tts_speed(config.tts_speed),
             "owner_name": config.owner_name,
             "owner_email": config.owner_email,
             "reply_to_email": config.reply_to_email,
@@ -547,6 +559,7 @@ def config_form_payload(config: TenantAgentConfig | None) -> dict[str, Any]:
         "enabled_tools": dict(config.enabled_tools or {}),
         "llm_model": config.llm_model,
         "tts_voice": config.tts_voice,
+        "tts_speed": normalize_tts_speed(config.tts_speed),
         "owner_name": config.owner_name,
         "owner_email": config.owner_email,
         "reply_to_email": config.reply_to_email,

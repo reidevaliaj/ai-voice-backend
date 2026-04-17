@@ -77,6 +77,7 @@ class TenantAgentConfig(Base):
     enabled_tools: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     llm_model: Mapped[str] = mapped_column(String(100), default="gpt-4.1-mini", nullable=False)
     tts_voice: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    tts_speed: Mapped[float] = mapped_column(default=1.0, nullable=False)
     owner_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     owner_email: Mapped[str] = mapped_column(String(320), default="", nullable=False)
     reply_to_email: Mapped[str] = mapped_column(String(320), default="", nullable=False)

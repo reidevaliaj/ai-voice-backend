@@ -1,4 +1,4 @@
-import json
+﻿import json
 import logging
 import os
 import re
@@ -16,9 +16,9 @@ REQUIRE_EXPLICIT_END_CONFIRMATION = os.getenv("REQUIRE_EXPLICIT_END_CONFIRMATION
 
 EXPLICIT_END_PATTERNS = (
     r"\b(that'?s all|thats all|goodbye|bye|have a good day|nothing else|no thank you|no thanks)\b",
-    r"\b(arrivederci|ciao|basta cos[ìi]|tutto qui|non serve altro|grazie arrivederci)\b",
-    r"\b(auf wiedersehen|tsch[uü]ss|das ist alles|sonst nichts|nein danke)\b",
-    r"\b(adios|adi[oó]s|eso es todo|nada m[aá]s|no gracias)\b",
+    r"\b(arrivederci|ciao|basta cos[Ã¬i]|tutto qui|non serve altro|grazie arrivederci)\b",
+    r"\b(auf wiedersehen|tsch[uÃ¼]ss|das ist alles|sonst nichts|nein danke)\b",
+    r"\b(adios|adi[oÃ³]s|eso es todo|nada m[aÃ¡]s|no gracias)\b",
 )
 
 
@@ -77,6 +77,19 @@ def _has_explicit_end_phrase(transcript: str) -> bool:
         return False
     combined = " ".join(user_lines)
     return any(re.search(pattern, combined, flags=re.IGNORECASE) for pattern in EXPLICIT_END_PATTERNS)
+
+
+def _last_user_line_supports_end(transcript: str) -> bool:
+    user_lines = _user_lines_from_transcript(transcript)
+    if not user_lines:
+        return False
+    last = user_lines[-1].strip()
+    if not last:
+        return False
+    concise_patterns = (
+        r"^(no|no grazie|grazie|grazie mille|arrivederci|ciao|a presto|buona giornata|goodbye|bye|thanks|thank you|no thanks|no thank you|nein danke|auf wiedersehen|tsch[uü]ss|adios|no gracias)[.! ]*$",
+    )
+    return any(re.search(pattern, last, flags=re.IGNORECASE) for pattern in concise_patterns)
 
 
 def analyze_transcript(
@@ -169,12 +182,13 @@ def decide_call_end(payload: Dict[str, Any], business_context: Dict[str, Any] | 
     fallback = {"end_call": 0}
     transcript = str(payload.get("transcript", "") or "")
     explicit_end_detected = _has_explicit_end_phrase(transcript)
+    end_signal_detected = explicit_end_detected or _last_user_line_supports_end(transcript)
 
-    if REQUIRE_EXPLICIT_END_CONFIRMATION and not explicit_end_detected:
+    if REQUIRE_EXPLICIT_END_CONFIRMATION and not end_signal_detected:
         return fallback
 
     if not OPENAI_API_KEY:
-        return {"end_call": 1} if explicit_end_detected and not REQUIRE_EXPLICIT_END_CONFIRMATION else fallback
+        return {"end_call": 1} if end_signal_detected else fallback
 
     system_prompt = """
 You are a strict validator helper for a multi-tenant AI receptionist.
@@ -225,7 +239,8 @@ Output JSON fields:
     end_call_val = parsed.get("end_call", 0)
     end_call = 1 if str(end_call_val).strip().lower() in ("1", "true", "yes") else 0
     if REQUIRE_EXPLICIT_END_CONFIRMATION:
-        end_call = 1 if explicit_end_detected and end_call == 1 else 0
-    elif not ALLOW_COMPLETION_AUTO_END and not explicit_end_detected:
+        end_call = 1 if end_signal_detected and end_call == 1 else 0
+    elif not ALLOW_COMPLETION_AUTO_END and not end_signal_detected:
         end_call = 0
     return {"end_call": end_call}
+

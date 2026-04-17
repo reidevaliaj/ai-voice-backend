@@ -54,6 +54,14 @@
         <input type="text" name="business_name" value="{{ config_form.business_name }}" required />
       </div>
       <div>
+        <label>Primary Language</label>
+        <select name="assistant_language" id="assistant-language-select" required>
+          {% for item in language_choices %}
+          <option value="{{ item.code }}" {% if item.code == config_form.assistant_language %}selected{% endif %}>{{ item.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
         <label>Timezone</label>
         <input type="text" name="timezone" value="{{ config_form.timezone }}" required />
       </div>
@@ -61,6 +69,11 @@
     <div>
       <label>Greeting</label>
       <textarea name="greeting">{{ config_form.greeting }}</textarea>
+    </div>
+    <div>
+      <label>Tenant Base Prompt</label>
+      <textarea name="tenant_prompt" required>{{ config_form.tenant_prompt }}</textarea>
+      <p class="muted">This is the required tenant-specific receptionist prompt. It defines the client-specific behavior while platform safety rules still stay shared.</p>
     </div>
     <div>
       <label>Services (one per line)</label>
@@ -71,7 +84,7 @@
       <textarea name="faq_notes">{{ config_form.faq_notes }}</textarea>
     </div>
     <div>
-      <label>Prompt Appendix</label>
+      <label>Optional Prompt Appendix</label>
       <textarea name="prompt_appendix">{{ config_form.prompt_appendix }}</textarea>
     </div>
     <div class="row">
@@ -98,8 +111,27 @@
         <input type="text" name="llm_model" value="{{ config_form.llm_model }}" />
       </div>
       <div>
-        <label>TTS Voice</label>
-        <input type="text" name="tts_voice" value="{{ config_form.tts_voice }}" />
+        <label>Preferred Cartesia Voice</label>
+        <select name="tts_voice" id="tts-voice-select" data-selected-voice="{{ config_form.tts_voice }}">
+          {% if cartesia_voice_options %}
+            {% for voice in cartesia_voice_options %}
+            <option value="{{ voice.id }}" {% if voice.id == config_form.tts_voice %}selected{% endif %}>
+              {{ voice.name }}{% if voice.gender %} · {{ voice.gender }}{% endif %}
+            </option>
+            {% endfor %}
+          {% elif config_form.tts_voice %}
+            <option value="{{ config_form.tts_voice }}" selected>{{ config_form.tts_voice }}</option>
+          {% else %}
+            <option value="">Select a preferred voice</option>
+          {% endif %}
+        </select>
+        <p class="muted" id="tts-voice-status">
+          {% if cartesia_voice_error %}
+          {{ cartesia_voice_error }}
+          {% else %}
+          Voices are loaded live from Cartesia and filtered by the selected tenant language.
+          {% endif %}
+        </p>
       </div>
       <div>
         <label>Owner Name</label>
@@ -256,6 +288,9 @@
     const emailEvents = document.getElementById("recent-email-events");
     const debugPath = document.getElementById("agent-debug-path");
     const runtimePath = document.getElementById("agent-runtime-path");
+    const languageSelect = document.getElementById("assistant-language-select");
+    const voiceSelect = document.getElementById("tts-voice-select");
+    const voiceStatus = document.getElementById("tts-voice-status");
 
     async function refreshDebug() {
       try {
@@ -282,7 +317,56 @@
       }
     }
 
+    async function refreshVoices() {
+      const language = languageSelect.value || "en";
+      const selectedVoice = voiceSelect.dataset.selectedVoice || voiceSelect.value || "";
+      voiceStatus.textContent = "Loading Cartesia voices...";
+      try {
+        const response = await fetch(
+          `/admin/cartesia/voices?language=${encodeURIComponent(language)}&selected=${encodeURIComponent(selectedVoice)}`,
+          { headers: { "X-Requested-With": "fetch" } }
+        );
+        const payload = await response.json();
+        const voices = Array.isArray(payload.voices) ? payload.voices : [];
+        const previousValue = voiceSelect.value || selectedVoice;
+        voiceSelect.innerHTML = "";
+        if (!voices.length) {
+          const option = document.createElement("option");
+          option.value = previousValue;
+          option.textContent = previousValue || "No Cartesia voices available";
+          if (previousValue) {
+            option.selected = true;
+          }
+          voiceSelect.appendChild(option);
+          voiceStatus.textContent = payload.error || "No voices were returned for this language.";
+          return;
+        }
+        voices.forEach((voice) => {
+          const option = document.createElement("option");
+          option.value = voice.id;
+          option.textContent = `${voice.name}${voice.gender ? " · " + voice.gender : ""}`;
+          if (voice.id === previousValue) {
+            option.selected = true;
+          }
+          voiceSelect.appendChild(option);
+        });
+        if (!voiceSelect.value && voices.length) {
+          voiceSelect.value = voices[0].id;
+        }
+        voiceSelect.dataset.selectedVoice = voiceSelect.value || previousValue;
+        voiceStatus.textContent = "Voices are loaded live from Cartesia and filtered by the selected tenant language.";
+      } catch (error) {
+        voiceStatus.textContent = "Unable to load Cartesia voices right now.";
+      }
+    }
+
+    languageSelect.addEventListener("change", refreshVoices);
+    voiceSelect.addEventListener("change", () => {
+      voiceSelect.dataset.selectedVoice = voiceSelect.value || "";
+    });
+
     setInterval(refreshDebug, 3000);
+    refreshVoices();
   })();
 </script>
 {% endblock %}

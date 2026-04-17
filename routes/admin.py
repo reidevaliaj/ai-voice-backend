@@ -12,6 +12,7 @@ from app_config import AGENT_DEBUG_LOG_PATH, AGENT_LOG_PATH, DEBUG_LOG_MAX_CHARS
 from db import get_db
 from models import AdminUser, CallEvent, Tenant, TenantPhoneNumber
 from security import decrypt_json, mask_secret, verify_password
+from services.cartesia import get_cartesia_voice_options
 from services.tenants import (
     build_runtime_context,
     config_form_payload,
@@ -21,8 +22,10 @@ from services.tenants import (
     get_integration_payload,
     get_tenant_by_slug,
     integration_form_payload,
+    normalize_assistant_language,
     normalize_phone_number,
     parse_lines,
+    supported_assistant_languages,
     upsert_integration,
     upsert_phone_number,
 )
@@ -160,6 +163,7 @@ async def admin_home(request: Request, db: Session = Depends(get_db)):
             "flash": _consume_flash(request),
             "tenant_cards": cards,
             "public_base_url": PUBLIC_BASE_URL,
+            "language_choices": supported_assistant_languages(),
         },
     )
 
@@ -172,13 +176,29 @@ async def create_tenant_action(request: Request, db: Session = Depends(get_db)):
     display_name = str(form.get("display_name") or "").strip()
     phone_number = str(form.get("phone_number") or "").strip()
     notes = str(form.get("notes") or "").strip()
+    assistant_language = normalize_assistant_language(str(form.get("assistant_language") or "en"))
+    tenant_prompt = str(form.get("tenant_prompt") or "").strip()
+    tts_voice = str(form.get("tts_voice") or "").strip()
     if not slug or not display_name:
         _flash(request, "error", "Slug and display name are required")
+        return RedirectResponse(url="/admin", status_code=303)
+    if not tenant_prompt:
+        _flash(request, "error", "A tenant base prompt is required when creating a tenant")
         return RedirectResponse(url="/admin", status_code=303)
     if get_tenant_by_slug(db, slug):
         _flash(request, "error", f"Tenant '{slug}' already exists")
         return RedirectResponse(url="/admin", status_code=303)
-    tenant = create_tenant(db, slug, display_name, notes=notes)
+    tenant = create_tenant(
+        db,
+        slug,
+        display_name,
+        notes=notes,
+        config_overrides={
+            "assistant_language": assistant_language,
+            "tenant_prompt": tenant_prompt,
+            "tts_voice": tts_voice,
+        },
+    )
     if phone_number:
         upsert_phone_number(db, tenant, phone_number)
     _flash(request, "success", f"Tenant '{display_name}' created")
@@ -200,6 +220,14 @@ async def tenant_detail(slug: str, request: Request, db: Session = Depends(get_d
     )
     integration_summary = _integration_summary(db, tenant.id)
     runtime = build_runtime_context(db, tenant) if config else None
+    selected_language = normalize_assistant_language((runtime or {}).get("config", {}).get("assistant_language", "en"))
+    selected_voice = str((runtime or {}).get("config", {}).get("tts_voice") or "")
+    voice_options: list[dict[str, Any]] = []
+    voice_error = ""
+    try:
+        voice_options = get_cartesia_voice_options(selected_language, selected_voice=selected_voice)
+    except Exception as exc:
+        voice_error = str(exc)
     return templates.TemplateResponse(
         request,
         "admin/tenant_detail.html",
@@ -217,6 +245,9 @@ async def tenant_detail(slug: str, request: Request, db: Session = Depends(get_d
             "recent_events": recent_events,
             "recent_email_events": _latest_email_events(tenant_id=tenant.id),
             "runtime": runtime,
+            "language_choices": supported_assistant_languages(),
+            "cartesia_voice_options": voice_options,
+            "cartesia_voice_error": voice_error,
             "agent_debug_log": _read_log_tail(AGENT_DEBUG_LOG_PATH),
             "agent_runtime_log": _read_log_tail(AGENT_LOG_PATH),
             "flash": _consume_flash(request),
@@ -241,6 +272,17 @@ async def tenant_debug_log(slug: str, request: Request, db: Session = Depends(ge
     )
 
 
+@router.get("/admin/cartesia/voices")
+async def cartesia_voice_options(request: Request, language: str = "en", selected: str = "", db: Session = Depends(get_db)):
+    require_admin(request, db)
+    normalized_language = normalize_assistant_language(language)
+    try:
+        voices = get_cartesia_voice_options(normalized_language, selected_voice=selected)
+        return JSONResponse({"ok": True, "language": normalized_language, "voices": voices})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "language": normalized_language, "voices": [], "error": str(exc)})
+
+
 @router.post("/admin/tenants/{slug}/config")
 async def update_tenant_config(slug: str, request: Request, db: Session = Depends(get_db)):
     require_admin(request, db)
@@ -263,8 +305,10 @@ async def update_tenant_config(slug: str, request: Request, db: Session = Depend
 
     payload = {
         "business_name": str(form.get("business_name") or tenant.display_name).strip(),
+        "assistant_language": normalize_assistant_language(str(form.get("assistant_language") or "en")),
         "timezone": str(form.get("timezone") or "Europe/Budapest").strip(),
         "greeting": str(form.get("greeting") or "").strip(),
+        "tenant_prompt": str(form.get("tenant_prompt") or "").strip(),
         "services": parse_lines(str(form.get("services") or "")),
         "faq_notes": str(form.get("faq_notes") or "").strip(),
         "prompt_appendix": str(form.get("prompt_appendix") or "").strip(),
@@ -282,6 +326,9 @@ async def update_tenant_config(slug: str, request: Request, db: Session = Depend
         "notification_targets": parse_lines(str(form.get("notification_targets") or "")),
         "extra_settings": extra_settings,
     }
+    if not payload["tenant_prompt"]:
+        _flash(request, "error", "Tenant base prompt is required")
+        return RedirectResponse(url=f"/admin/tenants/{slug}", status_code=303)
     create_config_version(db, tenant, payload)
     _flash(request, "success", "New configuration version saved")
     return RedirectResponse(url=f"/admin/tenants/{slug}", status_code=303)

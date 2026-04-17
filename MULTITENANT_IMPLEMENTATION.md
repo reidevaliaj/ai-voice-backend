@@ -5,6 +5,7 @@
 - Replaced hardcoded business config with tenant config loaded from the database.
 - Added per-tenant phone routing, agent config versioning, encrypted integrations, call event logging, and call config snapshots.
 - Added an internal FastAPI admin dashboard for creating tenants, assigning numbers, editing prompts/settings, and managing integrations.
+- Added tenant-level required receptionist prompts, language selection, and Cartesia voice selection in admin.
 - Added `/agent/session-config` so the shared LiveKit agent can load a per-call config snapshot.
 - Changed `/incoming-call` to resolve the tenant from the inbound number and send tenant context toward the SIP leg.
 
@@ -29,6 +30,9 @@
 - `LIVEKIT_SIP_PASSWORD`
 - `PUBLIC_BASE_URL`
 - `INTERNAL_API_KEY`
+- `CARTESIA_API_KEY`
+- `CARTESIA_VERSION`
+- `DEFAULT_ASSISTANT_LANGUAGE`
 
 ## Database Notes
 - This rollout expects a brand-new database named `ai_voice_assistant`.
@@ -43,6 +47,8 @@
 - Login path: `/admin/login`
 - Bootstrap admin is created from `ADMIN_BOOTSTRAP_EMAIL` and `ADMIN_BOOTSTRAP_PASSWORD`
 - Saving tenant config creates a new config version instead of mutating the old one.
+- Each tenant config now requires a tenant-specific base prompt and selected language.
+- Cartesia voice choices are loaded from the Cartesia API and filtered by the selected tenant language when `CARTESIA_API_KEY` is configured on the backend.
 - Integration credentials are stored encrypted in `tenant_integrations.credentials_encrypted`.
 
 ## Deployment Notes

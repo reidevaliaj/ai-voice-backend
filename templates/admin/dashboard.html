@@ -16,6 +16,14 @@
       </div>
       <div class="row">
         <div>
+          <label>Primary Language</label>
+          <select name="assistant_language" id="create-assistant-language" required>
+            {% for item in language_choices %}
+            <option value="{{ item.code }}">{{ item.label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
           <label>Primary Inbound Number</label>
           <input type="text" name="phone_number" placeholder="+18382215361" />
         </div>
@@ -23,6 +31,24 @@
           <label>Notes</label>
           <input type="text" name="notes" placeholder="Internal notes" />
         </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Preferred Cartesia Voice</label>
+          <select name="tts_voice" id="create-tts-voice">
+            <option value="">Loading voices...</option>
+          </select>
+          <p class="muted" id="create-tts-voice-status">Loading Cartesia voices for the selected language.</p>
+        </div>
+      </div>
+      <div>
+        <label>Tenant Base Prompt</label>
+        <textarea
+          name="tenant_prompt"
+          id="create-tenant-prompt"
+          placeholder="Describe how this tenant's receptionist should behave, what the business does, and what kind of callers it should help."
+          required
+        ></textarea>
       </div>
       <div class="actions">
         <button type="submit">Create Tenant</button>
@@ -66,4 +92,50 @@
     {% endfor %}
   </div>
 </section>
+
+<script>
+  (function () {
+    const languageSelect = document.getElementById("create-assistant-language");
+    const voiceSelect = document.getElementById("create-tts-voice");
+    const voiceStatus = document.getElementById("create-tts-voice-status");
+
+    async function loadVoices() {
+      const language = languageSelect.value || "en";
+      voiceStatus.textContent = "Loading Cartesia voices...";
+      try {
+        const response = await fetch(`/admin/cartesia/voices?language=${encodeURIComponent(language)}`, {
+          headers: { "X-Requested-With": "fetch" },
+        });
+        const payload = await response.json();
+        const voices = Array.isArray(payload.voices) ? payload.voices : [];
+        voiceSelect.innerHTML = "";
+        if (!voices.length) {
+          const empty = document.createElement("option");
+          empty.value = "";
+          empty.textContent = "No Cartesia voices available";
+          voiceSelect.appendChild(empty);
+          voiceStatus.textContent = payload.error || "No voices were returned for this language.";
+          return;
+        }
+        const blank = document.createElement("option");
+        blank.value = "";
+        blank.textContent = "Select a preferred voice";
+        voiceSelect.appendChild(blank);
+        voices.forEach((voice) => {
+          const option = document.createElement("option");
+          option.value = voice.id;
+          option.textContent = `${voice.name}${voice.gender ? " · " + voice.gender : ""}`;
+          voiceSelect.appendChild(option);
+        });
+        voiceStatus.textContent = "Voices are loaded live from Cartesia and filtered by the chosen language.";
+      } catch (error) {
+        voiceSelect.innerHTML = '<option value="">Unable to load voices</option>';
+        voiceStatus.textContent = "Unable to load Cartesia voices right now.";
+      }
+    }
+
+    languageSelect.addEventListener("change", loadVoices);
+    loadVoices();
+  })();
+</script>
 {% endblock %}

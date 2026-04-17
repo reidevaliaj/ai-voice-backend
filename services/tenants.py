@@ -7,7 +7,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app_config import (
+    CARTESIA_API_KEY,
     DATA_DIR,
+    DEFAULT_ASSISTANT_LANGUAGE,
     DEFAULT_BOOKING_HORIZON_DAYS,
     DEFAULT_BUSINESS_DAYS,
     DEFAULT_BUSINESS_HOURS,
@@ -74,11 +76,46 @@ def default_enabled_tools() -> dict[str, bool]:
     }
 
 
+SUPPORTED_ASSISTANT_LANGUAGES: tuple[tuple[str, str], ...] = (
+    ("en", "English"),
+    ("it", "Italian"),
+    ("de", "German"),
+)
+SUPPORTED_ASSISTANT_LANGUAGE_MAP = {code: label for code, label in SUPPORTED_ASSISTANT_LANGUAGES}
+
+
+def normalize_assistant_language(value: str | None) -> str:
+    candidate = (value or DEFAULT_ASSISTANT_LANGUAGE or "en").strip().lower()
+    if candidate in SUPPORTED_ASSISTANT_LANGUAGE_MAP:
+        return candidate
+    fallback = (DEFAULT_ASSISTANT_LANGUAGE or "en").strip().lower()
+    return fallback if fallback in SUPPORTED_ASSISTANT_LANGUAGE_MAP else "en"
+
+
+def assistant_language_label(code: str | None) -> str:
+    return SUPPORTED_ASSISTANT_LANGUAGE_MAP.get(normalize_assistant_language(code))
+
+
+def supported_assistant_languages() -> list[dict[str, str]]:
+    return [{"code": code, "label": label} for code, label in SUPPORTED_ASSISTANT_LANGUAGES]
+
+
+def default_tenant_prompt(display_name: str) -> str:
+    business = (display_name or "the business").strip() or "the business"
+    return (
+        f"You are the receptionist for {business}. "
+        "Help callers understand the business, answer only with the services and notes configured for this tenant, "
+        "collect accurate lead or support details, and guide the caller to the next useful step."
+    )
+
+
 def default_config_payload(display_name: str = "Code Studio") -> dict[str, Any]:
     return {
         "business_name": display_name,
+        "assistant_language": normalize_assistant_language(DEFAULT_ASSISTANT_LANGUAGE),
         "timezone": DEFAULT_BUSINESS_TIMEZONE,
         "greeting": f"Thanks for calling {display_name}. How may we help you today?",
+        "tenant_prompt": default_tenant_prompt(display_name),
         "services": [
             "Web Design",
             "WordPress, TYPO3, Shopify",
@@ -103,6 +140,7 @@ def default_config_payload(display_name: str = "Code Studio") -> dict[str, Any]:
         "notification_targets": [DEFAULT_OWNER_EMAIL],
         "extra_settings": {
             "meeting_owner_email": DEFAULT_MEETING_OWNER_EMAIL,
+            "cartesia_voice_source": "platform_default" if not CARTESIA_API_KEY else "cartesia_api",
             "call_types": [
                 "sales_lead",
                 "support_issue",
@@ -181,11 +219,20 @@ def get_config_by_version(session: Session, tenant_id: str, version: int) -> Ten
     return session.scalar(stmt)
 
 
-def create_tenant(session: Session, slug: str, display_name: str, notes: str = "") -> Tenant:
+def create_tenant(
+    session: Session,
+    slug: str,
+    display_name: str,
+    notes: str = "",
+    config_overrides: dict[str, Any] | None = None,
+) -> Tenant:
     tenant = Tenant(slug=slug, display_name=display_name, notes=notes, status="active")
     session.add(tenant)
     session.flush()
-    create_config_version(session, tenant, default_config_payload(display_name))
+    payload = default_config_payload(display_name)
+    if config_overrides:
+        payload.update(config_overrides)
+    create_config_version(session, tenant, payload)
     return tenant
 
 
@@ -199,8 +246,10 @@ def create_config_version(session: Session, tenant: Tenant, payload: dict[str, A
         version=next_version,
         is_active=True,
         business_name=str(payload.get("business_name") or tenant.display_name),
+        assistant_language=normalize_assistant_language(str(payload.get("assistant_language") or DEFAULT_ASSISTANT_LANGUAGE)),
         timezone=str(payload.get("timezone") or DEFAULT_BUSINESS_TIMEZONE),
         greeting=str(payload.get("greeting") or f"Thanks for calling {tenant.display_name}. How may we help you today?"),
+        tenant_prompt=str(payload.get("tenant_prompt") or default_tenant_prompt(tenant.display_name)).strip(),
         services=parse_lines(payload.get("services")),
         faq_notes=str(payload.get("faq_notes") or ""),
         prompt_appendix=str(payload.get("prompt_appendix") or ""),
@@ -315,8 +364,11 @@ def build_runtime_context(session: Session, tenant: Tenant, config_version: int 
         "config": {
             "version": config.version,
             "business_name": config.business_name,
+            "assistant_language": config.assistant_language,
+            "assistant_language_label": assistant_language_label(config.assistant_language),
             "timezone": config.timezone,
             "greeting": config.greeting,
+            "tenant_prompt": config.tenant_prompt,
             "services": list(config.services or []),
             "faq_notes": config.faq_notes,
             "prompt_appendix": config.prompt_appendix,
@@ -481,8 +533,10 @@ def config_form_payload(config: TenantAgentConfig | None) -> dict[str, Any]:
         return default_config_payload()
     return {
         "business_name": config.business_name,
+        "assistant_language": config.assistant_language,
         "timezone": config.timezone,
         "greeting": config.greeting,
+        "tenant_prompt": config.tenant_prompt,
         "services": "\n".join(config.services or []),
         "faq_notes": config.faq_notes,
         "prompt_appendix": config.prompt_appendix,

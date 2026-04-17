@@ -123,6 +123,8 @@ def _business_context(runtime: dict[str, Any]) -> dict[str, Any]:
     config = runtime["config"]
     return {
         "business_name": config["business_name"],
+        "assistant_language": config.get("assistant_language", "en"),
+        "tenant_prompt": config.get("tenant_prompt", ""),
         "services": config["services"],
         "faq_notes": config["faq_notes"],
         "prompt_appendix": config["prompt_appendix"],

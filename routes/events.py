@@ -172,7 +172,9 @@ def _persist_zoom_credentials_if_changed(db: Session, runtime: dict[str, Any], u
 def _send_email_summary(payload: TranscriptPayload, analysis: Dict[str, Any], runtime: dict[str, Any]) -> None:
     config = runtime["config"]
     email_settings = runtime["integrations"]["email"].get("settings") or {}
-    targets = list(email_settings.get("notification_targets") or config.get("notification_targets") or [])
+    config_targets = [item for item in config.get("notification_targets") or [] if item]
+    integration_targets = [item for item in email_settings.get("notification_targets") or [] if item]
+    targets = list(config_targets or integration_targets)
     owner_email = str(config.get("owner_email") or "").strip()
     if owner_email and owner_email not in targets:
         targets.append(owner_email)

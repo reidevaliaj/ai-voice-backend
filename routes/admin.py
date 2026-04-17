@@ -49,6 +49,14 @@ def _read_log_tail(path_value: str, max_chars: int = DEBUG_LOG_MAX_CHARS) -> dic
     return {"path": str(path), "exists": True, "content": content, "size": len(raw)}
 
 
+def _truncate_log(path_value: str) -> dict[str, Any]:
+    path = Path(path_value)
+    if not path.exists():
+        return {"path": str(path), "exists": False, "cleared": False}
+    path.write_text("", encoding="utf-8")
+    return {"path": str(path), "exists": True, "cleared": True}
+
+
 def _flash(request: Request, level: str, message: str) -> None:
     request.session["flash"] = {"level": level, "message": message}
 
@@ -270,6 +278,25 @@ async def tenant_debug_log(slug: str, request: Request, db: Session = Depends(ge
             "recent_email_events": _latest_email_events(tenant_id=tenant.id),
         }
     )
+
+
+@router.post("/admin/tenants/{slug}/clear-log")
+async def clear_tenant_log(slug: str, request: Request, db: Session = Depends(get_db)):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    form = await request.form()
+    log_type = str(form.get("log_type") or "").strip().lower()
+    if log_type == "runtime":
+        _truncate_log(AGENT_LOG_PATH)
+        _flash(request, "success", "Agent runtime log cleared")
+    elif log_type == "debug":
+        _truncate_log(AGENT_DEBUG_LOG_PATH)
+        _flash(request, "success", "Live call debug log cleared")
+    else:
+        _flash(request, "error", "Unknown log type")
+    return RedirectResponse(url=f"/admin/tenants/{slug}", status_code=303)
 
 
 @router.get("/admin/cartesia/voices")

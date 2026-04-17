@@ -230,12 +230,20 @@
 <section class="panel" style="margin-top: 18px;">
   <h2>Live Call Debug</h2>
   <p class="muted">Auto-refreshes while you keep this page open. Source: <code id="agent-debug-path">{{ agent_debug_log.path }}</code></p>
+  <form method="post" action="/admin/tenants/{{ tenant.slug }}/clear-log" class="actions" style="margin-bottom: 10px;">
+    <input type="hidden" name="log_type" value="debug" />
+    <button type="submit" class="secondary">Clear Live Debug Log</button>
+  </form>
   <pre id="agent-debug-log">{{ agent_debug_log.content or 'No live debug log content yet.' }}</pre>
 </section>
 
 <section class="panel" style="margin-top: 18px;">
   <h2>Agent Runtime Log</h2>
   <p class="muted">Useful if the worker itself has startup or runtime issues. Source: <code id="agent-runtime-path">{{ agent_runtime_log.path }}</code></p>
+  <form method="post" action="/admin/tenants/{{ tenant.slug }}/clear-log" class="actions" style="margin-bottom: 10px;">
+    <input type="hidden" name="log_type" value="runtime" />
+    <button type="submit" class="secondary">Clear Agent Runtime Log</button>
+  </form>
   <pre id="agent-runtime-log">{{ agent_runtime_log.content or 'No agent runtime log content yet.' }}</pre>
 </section>
 

@@ -11,6 +11,15 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("TRANSCRIPT_DECISION_MODEL", "gpt-4.1-mini")
 CALL_END_MODEL = os.getenv("CALL_END_DECISION_MODEL", OPENAI_MODEL or "gpt-4.1-mini")
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+ALLOW_COMPLETION_AUTO_END = os.getenv("ALLOW_COMPLETION_AUTO_END", "false").strip().lower() == "true"
+REQUIRE_EXPLICIT_END_CONFIRMATION = os.getenv("REQUIRE_EXPLICIT_END_CONFIRMATION", "false").strip().lower() == "true"
+
+EXPLICIT_END_PATTERNS = (
+    r"\b(that'?s all|thats all|goodbye|bye|have a good day|nothing else|no thank you|no thanks)\b",
+    r"\b(arrivederci|ciao|basta cos[ìi]|tutto qui|non serve altro|grazie arrivederci)\b",
+    r"\b(auf wiedersehen|tsch[uü]ss|das ist alles|sonst nichts|nein danke)\b",
+    r"\b(adios|adi[oó]s|eso es todo|nada m[aá]s|no gracias)\b",
+)
 
 
 def _normalize_email(value: str) -> str:
@@ -51,6 +60,23 @@ def _fallback_result() -> Dict[str, Any]:
         "problem_description": "",
         "confidence": 0.0,
     }
+
+
+def _user_lines_from_transcript(transcript: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in (transcript or "").splitlines():
+        line = raw_line.strip()
+        if line.lower().startswith("user:"):
+            lines.append(line.split(":", 1)[1].strip().lower())
+    return lines
+
+
+def _has_explicit_end_phrase(transcript: str) -> bool:
+    user_lines = _user_lines_from_transcript(transcript)
+    if not user_lines:
+        return False
+    combined = " ".join(user_lines)
+    return any(re.search(pattern, combined, flags=re.IGNORECASE) for pattern in EXPLICIT_END_PATTERNS)
 
 
 def analyze_transcript(
@@ -141,8 +167,14 @@ case_reason, preferred_time_window, problem_description, confidence
 
 def decide_call_end(payload: Dict[str, Any], business_context: Dict[str, Any] | None = None) -> Dict[str, Any]:
     fallback = {"end_call": 0}
-    if not OPENAI_API_KEY:
+    transcript = str(payload.get("transcript", "") or "")
+    explicit_end_detected = _has_explicit_end_phrase(transcript)
+
+    if REQUIRE_EXPLICIT_END_CONFIRMATION and not explicit_end_detected:
         return fallback
+
+    if not OPENAI_API_KEY:
+        return {"end_call": 1} if explicit_end_detected and not REQUIRE_EXPLICIT_END_CONFIRMATION else fallback
 
     system_prompt = """
 You are a strict validator helper for a multi-tenant AI receptionist.
@@ -151,6 +183,8 @@ Return STRICT JSON only.
 Approve end_call=1 only when one rule is explicitly supported by the transcript/messages.
 Use the tenant business context to judge whether the caller is asking for relevant business help or something unrelated/vendor-like.
 If uncertain, return end_call=0.
+
+If the caller did not explicitly signal that the call should end, be conservative and return end_call=0.
 
 Output JSON fields:
 - end_call: integer (0 or 1)
@@ -190,4 +224,8 @@ Output JSON fields:
 
     end_call_val = parsed.get("end_call", 0)
     end_call = 1 if str(end_call_val).strip().lower() in ("1", "true", "yes") else 0
+    if REQUIRE_EXPLICIT_END_CONFIRMATION:
+        end_call = 1 if explicit_end_detected and end_call == 1 else 0
+    elif not ALLOW_COMPLETION_AUTO_END and not explicit_end_detected:
+        end_call = 0
     return {"end_call": end_call}

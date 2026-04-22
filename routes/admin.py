@@ -23,10 +23,13 @@ from services.tenants import (
     get_tenant_by_slug,
     integration_form_payload,
     normalize_assistant_language,
+    normalize_endpointing_window,
     normalize_phone_number,
+    normalize_stt_language,
     normalize_tts_speed,
     parse_lines,
     supported_assistant_languages,
+    supported_stt_languages,
     upsert_integration,
     upsert_phone_number,
 )
@@ -173,6 +176,7 @@ async def admin_home(request: Request, db: Session = Depends(get_db)):
             "tenant_cards": cards,
             "public_base_url": PUBLIC_BASE_URL,
             "language_choices": supported_assistant_languages(),
+            "stt_language_choices": supported_stt_languages(),
         },
     )
 
@@ -187,6 +191,11 @@ async def create_tenant_action(request: Request, db: Session = Depends(get_db)):
     notes = str(form.get("notes") or "").strip()
     assistant_language = normalize_assistant_language(str(form.get("assistant_language") or "en"))
     tenant_prompt = str(form.get("tenant_prompt") or "").strip()
+    stt_language = normalize_stt_language(str(form.get("stt_language") or ""), assistant_language)
+    min_endpointing_delay, max_endpointing_delay = normalize_endpointing_window(
+        form.get("min_endpointing_delay"),
+        form.get("max_endpointing_delay"),
+    )
     tts_voice = str(form.get("tts_voice") or "").strip()
     tts_speed = normalize_tts_speed(form.get("tts_speed"))
     if not slug or not display_name:
@@ -206,6 +215,9 @@ async def create_tenant_action(request: Request, db: Session = Depends(get_db)):
         config_overrides={
             "assistant_language": assistant_language,
             "tenant_prompt": tenant_prompt,
+            "stt_language": stt_language,
+            "min_endpointing_delay": min_endpointing_delay,
+            "max_endpointing_delay": max_endpointing_delay,
             "tts_voice": tts_voice,
             "tts_speed": tts_speed,
         },
@@ -257,6 +269,7 @@ async def tenant_detail(slug: str, request: Request, db: Session = Depends(get_d
             "recent_email_events": _latest_email_events(tenant_id=tenant.id),
             "runtime": runtime,
             "language_choices": supported_assistant_languages(),
+            "stt_language_choices": supported_stt_languages(),
             "cartesia_voice_options": voice_options,
             "cartesia_voice_error": voice_error,
             "agent_debug_log": _read_log_tail(AGENT_DEBUG_LOG_PATH),
@@ -348,6 +361,9 @@ async def update_tenant_config(slug: str, request: Request, db: Session = Depend
         "booking_horizon_days": int(str(form.get("booking_horizon_days") or 14).strip() or 14),
         "enabled_tools": enabled_tools,
         "llm_model": str(form.get("llm_model") or "gpt-4.1-mini").strip(),
+        "stt_language": "",
+        "min_endpointing_delay": form.get("min_endpointing_delay"),
+        "max_endpointing_delay": form.get("max_endpointing_delay"),
         "tts_voice": str(form.get("tts_voice") or "").strip(),
         "tts_speed": normalize_tts_speed(form.get("tts_speed")),
         "owner_name": str(form.get("owner_name") or "").strip(),
@@ -357,6 +373,14 @@ async def update_tenant_config(slug: str, request: Request, db: Session = Depend
         "notification_targets": parse_lines(str(form.get("notification_targets") or "")),
         "extra_settings": extra_settings,
     }
+    payload["stt_language"] = normalize_stt_language(str(form.get("stt_language") or ""), payload["assistant_language"])
+    (
+        payload["min_endpointing_delay"],
+        payload["max_endpointing_delay"],
+    ) = normalize_endpointing_window(
+        payload.get("min_endpointing_delay"),
+        payload.get("max_endpointing_delay"),
+    )
     if not payload["tenant_prompt"]:
         _flash(request, "error", "Tenant base prompt is required")
         return RedirectResponse(url=f"/admin/tenants/{slug}", status_code=303)

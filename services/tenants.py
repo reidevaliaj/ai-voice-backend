@@ -83,6 +83,13 @@ SUPPORTED_ASSISTANT_LANGUAGES: tuple[tuple[str, str], ...] = (
     ("de", "German"),
 )
 SUPPORTED_ASSISTANT_LANGUAGE_MAP = {code: label for code, label in SUPPORTED_ASSISTANT_LANGUAGES}
+SUPPORTED_STT_LANGUAGES: tuple[tuple[str, str], ...] = (
+    ("en", "English"),
+    ("it", "Italian"),
+    ("de", "German"),
+    ("multi", "Automatic multilingual"),
+)
+SUPPORTED_STT_LANGUAGE_MAP = {code: label for code, label in SUPPORTED_STT_LANGUAGES}
 
 
 def normalize_assistant_language(value: str | None) -> str:
@@ -99,6 +106,34 @@ def assistant_language_label(code: str | None) -> str:
 
 def supported_assistant_languages() -> list[dict[str, str]]:
     return [{"code": code, "label": label} for code, label in SUPPORTED_ASSISTANT_LANGUAGES]
+
+
+def normalize_stt_language(value: str | None, assistant_language: str | None = None) -> str:
+    candidate = (value or "").strip().lower()
+    if candidate in SUPPORTED_STT_LANGUAGE_MAP:
+        return candidate
+    fallback = normalize_assistant_language(assistant_language)
+    return fallback if fallback in SUPPORTED_STT_LANGUAGE_MAP else "en"
+
+
+def supported_stt_languages() -> list[dict[str, str]]:
+    return [{"code": code, "label": label} for code, label in SUPPORTED_STT_LANGUAGES]
+
+
+def normalize_endpointing_delay(value: Any, *, default: float, min_value: float = 0.1, max_value: float = 6.0) -> float:
+    try:
+        delay = float(value if value not in (None, "") else default)
+    except (TypeError, ValueError):
+        delay = default
+    return min(max_value, max(min_value, delay))
+
+
+def normalize_endpointing_window(min_value: Any, max_value: Any, *, default_min: float = 0.3, default_max: float = 1.2) -> tuple[float, float]:
+    minimum = normalize_endpointing_delay(min_value, default=default_min)
+    maximum = normalize_endpointing_delay(max_value, default=default_max)
+    if maximum < minimum:
+        maximum = minimum
+    return minimum, maximum
 
 
 def normalize_tts_speed(value: Any) -> float:
@@ -119,9 +154,12 @@ def default_tenant_prompt(display_name: str) -> str:
 
 
 def default_config_payload(display_name: str = "Code Studio") -> dict[str, Any]:
+    assistant_language = normalize_assistant_language(DEFAULT_ASSISTANT_LANGUAGE)
+    min_endpointing_delay, max_endpointing_delay = normalize_endpointing_window(0.3, 1.2)
     return {
         "business_name": display_name,
-        "assistant_language": normalize_assistant_language(DEFAULT_ASSISTANT_LANGUAGE),
+        "assistant_language": assistant_language,
+        "stt_language": normalize_stt_language(assistant_language, assistant_language),
         "timezone": DEFAULT_BUSINESS_TIMEZONE,
         "greeting": f"Thanks for calling {display_name}. How may we help you today?",
         "tenant_prompt": default_tenant_prompt(display_name),
@@ -141,6 +179,8 @@ def default_config_payload(display_name: str = "Code Studio") -> dict[str, Any]:
         "booking_horizon_days": DEFAULT_BOOKING_HORIZON_DAYS,
         "enabled_tools": default_enabled_tools(),
         "llm_model": DEFAULT_LLM_MODEL,
+        "min_endpointing_delay": min_endpointing_delay,
+        "max_endpointing_delay": max_endpointing_delay,
         "tts_voice": DEFAULT_TTS_VOICE,
         "tts_speed": normalize_tts_speed(DEFAULT_TTS_SPEED),
         "owner_name": "Rey",
@@ -251,12 +291,19 @@ def create_config_version(session: Session, tenant: Tenant, payload: dict[str, A
     next_version = 1 if current is None else current.version + 1
     if current is not None:
         current.is_active = False
+    assistant_language = normalize_assistant_language(str(payload.get("assistant_language") or DEFAULT_ASSISTANT_LANGUAGE))
+    stt_language = normalize_stt_language(str(payload.get("stt_language") or ""), assistant_language)
+    min_endpointing_delay, max_endpointing_delay = normalize_endpointing_window(
+        payload.get("min_endpointing_delay"),
+        payload.get("max_endpointing_delay"),
+    )
     config = TenantAgentConfig(
         tenant_id=tenant.id,
         version=next_version,
         is_active=True,
         business_name=str(payload.get("business_name") or tenant.display_name),
-        assistant_language=normalize_assistant_language(str(payload.get("assistant_language") or DEFAULT_ASSISTANT_LANGUAGE)),
+        assistant_language=assistant_language,
+        stt_language=stt_language,
         timezone=str(payload.get("timezone") or DEFAULT_BUSINESS_TIMEZONE),
         greeting=str(payload.get("greeting") or f"Thanks for calling {tenant.display_name}. How may we help you today?"),
         tenant_prompt=str(payload.get("tenant_prompt") or default_tenant_prompt(tenant.display_name)).strip(),
@@ -269,6 +316,8 @@ def create_config_version(session: Session, tenant: Tenant, payload: dict[str, A
         booking_horizon_days=int(payload.get("booking_horizon_days") or DEFAULT_BOOKING_HORIZON_DAYS),
         enabled_tools=dict(payload.get("enabled_tools") or default_enabled_tools()),
         llm_model=str(payload.get("llm_model") or DEFAULT_LLM_MODEL),
+        min_endpointing_delay=min_endpointing_delay,
+        max_endpointing_delay=max_endpointing_delay,
         tts_voice=str(payload.get("tts_voice") or DEFAULT_TTS_VOICE),
         tts_speed=normalize_tts_speed(payload.get("tts_speed")),
         owner_name=str(payload.get("owner_name") or ""),
@@ -360,6 +409,10 @@ def build_runtime_context(session: Session, tenant: Tenant, config_version: int 
     config = get_config_by_version(session, tenant.id, config_version) if config_version else get_active_config(session, tenant.id)
     if config is None:
         raise RuntimeError(f"Tenant {tenant.slug} has no active configuration")
+    min_endpointing_delay, max_endpointing_delay = normalize_endpointing_window(
+        config.min_endpointing_delay,
+        config.max_endpointing_delay,
+    )
     integrations = {
         provider: get_integration_payload(session, tenant.id, provider)
         for provider in ("google_calendar", "zoom", "email")
@@ -377,6 +430,7 @@ def build_runtime_context(session: Session, tenant: Tenant, config_version: int 
             "business_name": config.business_name,
             "assistant_language": config.assistant_language,
             "assistant_language_label": assistant_language_label(config.assistant_language),
+            "stt_language": normalize_stt_language(config.stt_language, config.assistant_language),
             "timezone": config.timezone,
             "greeting": config.greeting,
             "tenant_prompt": config.tenant_prompt,
@@ -389,6 +443,8 @@ def build_runtime_context(session: Session, tenant: Tenant, config_version: int 
             "booking_horizon_days": config.booking_horizon_days,
             "enabled_tools": dict(config.enabled_tools or {}),
             "llm_model": config.llm_model,
+            "min_endpointing_delay": min_endpointing_delay,
+            "max_endpointing_delay": max_endpointing_delay,
             "tts_voice": config.tts_voice,
             "tts_speed": normalize_tts_speed(config.tts_speed),
             "owner_name": config.owner_name,
@@ -543,9 +599,14 @@ def seed_default_tenant(session: Session) -> Tenant:
 def config_form_payload(config: TenantAgentConfig | None) -> dict[str, Any]:
     if config is None:
         return default_config_payload()
+    min_endpointing_delay, max_endpointing_delay = normalize_endpointing_window(
+        config.min_endpointing_delay,
+        config.max_endpointing_delay,
+    )
     return {
         "business_name": config.business_name,
         "assistant_language": config.assistant_language,
+        "stt_language": normalize_stt_language(config.stt_language, config.assistant_language),
         "timezone": config.timezone,
         "greeting": config.greeting,
         "tenant_prompt": config.tenant_prompt,
@@ -558,6 +619,8 @@ def config_form_payload(config: TenantAgentConfig | None) -> dict[str, Any]:
         "booking_horizon_days": config.booking_horizon_days,
         "enabled_tools": dict(config.enabled_tools or {}),
         "llm_model": config.llm_model,
+        "min_endpointing_delay": min_endpointing_delay,
+        "max_endpointing_delay": max_endpointing_delay,
         "tts_voice": config.tts_voice,
         "tts_speed": normalize_tts_speed(config.tts_speed),
         "owner_name": config.owner_name,

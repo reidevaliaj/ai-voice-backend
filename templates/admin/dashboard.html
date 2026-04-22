@@ -46,6 +46,27 @@
           <p class="muted">1.0 is the default. Lower is slower, higher is faster.</p>
         </div>
       </div>
+      <div class="row">
+        <div>
+          <label>STT Language</label>
+          <select name="stt_language" id="create-stt-language">
+            {% for item in stt_language_choices %}
+            <option value="{{ item.code }}">{{ item.label }}</option>
+            {% endfor %}
+          </select>
+          <p class="muted">Recommended: match this to the tenant language unless you need automatic multilingual detection.</p>
+        </div>
+        <div>
+          <label>Minimum Endpointing Delay</label>
+          <input type="number" name="min_endpointing_delay" min="0.1" max="6.0" step="0.05" value="0.30" />
+          <p class="muted">Suggested faster phone value: 0.30 seconds.</p>
+        </div>
+        <div>
+          <label>Maximum Endpointing Delay</label>
+          <input type="number" name="max_endpointing_delay" min="0.1" max="6.0" step="0.05" value="1.20" />
+          <p class="muted">Suggested faster phone cap: 1.20 seconds.</p>
+        </div>
+      </div>
       <div>
         <label>Tenant Base Prompt</label>
         <textarea
@@ -101,8 +122,10 @@
 <script>
   (function () {
     const languageSelect = document.getElementById("create-assistant-language");
+    const sttSelect = document.getElementById("create-stt-language");
     const voiceSelect = document.getElementById("create-tts-voice");
     const voiceStatus = document.getElementById("create-tts-voice-status");
+    let sttTouched = false;
 
     async function loadVoices() {
       const language = languageSelect.value || "en";
@@ -129,7 +152,7 @@
         voices.forEach((voice) => {
           const option = document.createElement("option");
           option.value = voice.id;
-          option.textContent = `${voice.name}${voice.gender ? " · " + voice.gender : ""}`;
+          option.textContent = `${voice.name}${voice.gender ? " - " + voice.gender : ""}`;
           voiceSelect.appendChild(option);
         });
         voiceStatus.textContent = "Voices are loaded live from Cartesia and filtered by the chosen language.";
@@ -139,7 +162,25 @@
       }
     }
 
-    languageSelect.addEventListener("change", loadVoices);
+    function syncSttLanguage() {
+      if (sttTouched) {
+        return;
+      }
+      const assistantLanguage = languageSelect.value || "en";
+      if ([...sttSelect.options].some((option) => option.value === assistantLanguage)) {
+        sttSelect.value = assistantLanguage;
+      }
+    }
+
+    languageSelect.addEventListener("change", function () {
+      syncSttLanguage();
+      loadVoices();
+    });
+    sttSelect.addEventListener("change", function () {
+      sttTouched = true;
+    });
+
+    syncSttLanguage();
     loadVoices();
   })();
 </script>

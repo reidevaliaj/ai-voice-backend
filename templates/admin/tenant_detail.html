@@ -66,6 +66,27 @@
         <input type="text" name="timezone" value="{{ config_form.timezone }}" required />
       </div>
     </div>
+    <div class="row">
+      <div>
+        <label>STT Language</label>
+        <select name="stt_language" id="stt-language-select" required>
+          {% for item in stt_language_choices %}
+          <option value="{{ item.code }}" {% if item.code == config_form.stt_language %}selected{% endif %}>{{ item.label }}</option>
+          {% endfor %}
+        </select>
+        <p class="muted">Recommended: match this to the tenant language unless you truly need automatic multilingual detection.</p>
+      </div>
+      <div>
+        <label>Minimum Endpointing Delay</label>
+        <input type="number" name="min_endpointing_delay" min="0.1" max="6.0" step="0.05" value="{{ config_form.min_endpointing_delay }}" />
+        <p class="muted">Suggested faster phone value: 0.30 seconds.</p>
+      </div>
+      <div>
+        <label>Maximum Endpointing Delay</label>
+        <input type="number" name="max_endpointing_delay" min="0.1" max="6.0" step="0.05" value="{{ config_form.max_endpointing_delay }}" />
+        <p class="muted">Suggested faster phone cap: 1.20 seconds.</p>
+      </div>
+    </div>
     <div>
       <label>Greeting</label>
       <textarea name="greeting">{{ config_form.greeting }}</textarea>
@@ -116,7 +137,7 @@
           {% if cartesia_voice_options %}
             {% for voice in cartesia_voice_options %}
             <option value="{{ voice.id }}" {% if voice.id == config_form.tts_voice %}selected{% endif %}>
-              {{ voice.name }}{% if voice.gender %} · {{ voice.gender }}{% endif %}
+              {{ voice.name }}{% if voice.gender %} - {{ voice.gender }}{% endif %}
             </option>
             {% endfor %}
           {% elif config_form.tts_voice %}
@@ -302,8 +323,10 @@
     const debugPath = document.getElementById("agent-debug-path");
     const runtimePath = document.getElementById("agent-runtime-path");
     const languageSelect = document.getElementById("assistant-language-select");
+    const sttSelect = document.getElementById("stt-language-select");
     const voiceSelect = document.getElementById("tts-voice-select");
     const voiceStatus = document.getElementById("tts-voice-status");
+    let sttTouched = false;
 
     async function refreshDebug() {
       try {
@@ -327,6 +350,16 @@
         }
       } catch (error) {
         console.error("Failed to refresh debug log", error);
+      }
+    }
+
+    function syncSttLanguage() {
+      if (sttTouched) {
+        return;
+      }
+      const assistantLanguage = languageSelect.value || "en";
+      if ([...sttSelect.options].some((option) => option.value === assistantLanguage)) {
+        sttSelect.value = assistantLanguage;
       }
     }
 
@@ -357,7 +390,7 @@
         voices.forEach((voice) => {
           const option = document.createElement("option");
           option.value = voice.id;
-          option.textContent = `${voice.name}${voice.gender ? " · " + voice.gender : ""}`;
+          option.textContent = `${voice.name}${voice.gender ? " - " + voice.gender : ""}`;
           if (voice.id === previousValue) {
             option.selected = true;
           }
@@ -373,12 +406,19 @@
       }
     }
 
-    languageSelect.addEventListener("change", refreshVoices);
+    languageSelect.addEventListener("change", function () {
+      syncSttLanguage();
+      refreshVoices();
+    });
+    sttSelect.addEventListener("change", function () {
+      sttTouched = true;
+    });
     voiceSelect.addEventListener("change", () => {
       voiceSelect.dataset.selectedVoice = voiceSelect.value || "";
     });
 
     setInterval(refreshDebug, 3000);
+    syncSttLanguage();
     refreshVoices();
   })();
 </script>

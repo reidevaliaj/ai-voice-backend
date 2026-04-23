@@ -12,6 +12,30 @@ from app_config import TELNYX_API_BASE_URL, TELNYX_API_KEY
 logger = logging.getLogger("telnyx")
 
 
+def _extract_telnyx_error(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except Exception:
+        text = (response.text or "").strip()
+        return text or f"HTTP {response.status_code}"
+
+    if not isinstance(payload, dict):
+        return str(payload)
+
+    errors = payload.get("errors")
+    if isinstance(errors, list) and errors:
+        first = errors[0] if isinstance(errors[0], dict) else {}
+        detail = str(first.get("detail") or first.get("title") or "").strip()
+        code = str(first.get("code") or "").strip()
+        telnyx_error = payload.get("telnyx_error") if isinstance(payload.get("telnyx_error"), dict) else {}
+        telnyx_code = str(telnyx_error.get("error_code") or "").strip()
+        parts = [part for part in [detail, f"Telnyx code {telnyx_code}" if telnyx_code else "", f"Error {code}" if code else ""] if part]
+        if parts:
+            return " | ".join(parts)
+
+    return str(payload)
+
+
 def encode_client_state(payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     return base64.b64encode(raw).decode("ascii")
@@ -77,7 +101,10 @@ async def post_telnyx_request(path: str, body: dict[str, Any]) -> dict[str, Any]
     timeout = httpx.Timeout(15.0, connect=8.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url, headers=headers, json=body)
-        response.raise_for_status()
+        if response.is_error:
+            detail = _extract_telnyx_error(response)
+            logger.error("[TELNYX] path=%s status=%s error=%s", path, response.status_code, detail)
+            raise RuntimeError(detail)
         payload = response.json()
     logger.info("[TELNYX] path=%s response=%s", path, payload)
     return payload if isinstance(payload, dict) else {"raw": payload}

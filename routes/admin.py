@@ -35,9 +35,10 @@ from services.outgoing import (
     list_recent_outgoing_events,
     outgoing_profile_form_payload,
     save_outgoing_profile,
+    sync_outgoing_call_from_provider,
     upsert_outgoing_number,
 )
-from services.telnyx_voice import dial_call, encode_client_state, telnyx_command_id
+from services.telnyx_voice import dial_call, encode_client_state, get_call_details, telnyx_command_id
 from services.tenants import (
     build_runtime_context,
     config_form_payload,
@@ -64,6 +65,16 @@ from tools.zoom_meetings import ZoomContext, validate_zoom_context
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
+
+OUTGOING_ACTIVE_STATUSES = {
+    "queued",
+    "dialing",
+    "initiated",
+    "answered",
+    "awaiting_machine_detection",
+    "human_detected",
+    "livekit_transfer_requested",
+}
 
 
 def _read_log_tail(path_value: str, max_chars: int = DEBUG_LOG_MAX_CHARS) -> dict[str, Any]:
@@ -122,6 +133,20 @@ def _integration_summary(session: Session, tenant_id: str) -> dict[str, dict[str
             "last_error": payload.get("last_error", ""),
         }
     return summary
+
+
+async def _sync_recent_outgoing_calls_with_telnyx(outgoing_db: Session, calls: list[Any]) -> list[Any]:
+    synced: list[Any] = []
+    for call in calls:
+        if call.status not in OUTGOING_ACTIVE_STATUSES or not call.telnyx_call_control_id:
+            synced.append(call)
+            continue
+        try:
+            provider_payload = await get_call_details(call.telnyx_call_control_id)
+            synced.append(sync_outgoing_call_from_provider(outgoing_db, call, provider_payload))
+        except Exception:
+            synced.append(call)
+    return synced
 
 
 def _latest_email_events(limit: int = 10, tenant_id: str | None = None) -> list[dict[str, Any]]:
@@ -359,6 +384,10 @@ async def tenant_outgoing_detail(
         raise HTTPException(status_code=404, detail="Tenant not found")
     active_config = get_active_config(db, tenant.id)
     profile = ensure_outgoing_profile(outgoing_db, tenant, active_config=active_config)
+    recent_calls = await _sync_recent_outgoing_calls_with_telnyx(
+        outgoing_db,
+        list_recent_outgoing_calls(outgoing_db, tenant.id),
+    )
     return templates.TemplateResponse(
         request,
         "admin/outgoing_calls.html",
@@ -369,7 +398,7 @@ async def tenant_outgoing_detail(
             "runtime": build_runtime_context(db, tenant) if active_config else None,
             "outgoing_profile_form": outgoing_profile_form_payload(profile, tenant),
             "outgoing_numbers": list_outgoing_numbers(outgoing_db, tenant.id),
-            "recent_outgoing_calls": list_recent_outgoing_calls(outgoing_db, tenant.id),
+            "recent_outgoing_calls": recent_calls,
             "recent_outgoing_events": list_recent_outgoing_events(outgoing_db, tenant.id),
             "outgoing_agent_debug_log": _read_log_tail(OUTGOING_AGENT_DEBUG_LOG_PATH),
             "outgoing_agent_runtime_log": _read_log_tail(OUTGOING_AGENT_LOG_PATH),
@@ -391,6 +420,10 @@ async def outgoing_debug_log(
     tenant = get_tenant_by_slug(db, slug)
     if tenant is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
+    recent_calls = await _sync_recent_outgoing_calls_with_telnyx(
+        outgoing_db,
+        list_recent_outgoing_calls(outgoing_db, tenant.id),
+    )
     return JSONResponse(
         {
             "ok": True,
@@ -411,7 +444,7 @@ async def outgoing_debug_log(
                     "extra_json": call.extra_json or {},
                     "last_error": call.last_error,
                 }
-                for call in list_recent_outgoing_calls(outgoing_db, tenant.id)
+                for call in recent_calls
             ],
         }
     )

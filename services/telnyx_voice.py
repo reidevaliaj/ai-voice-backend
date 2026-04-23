@@ -110,8 +110,32 @@ async def post_telnyx_request(path: str, body: dict[str, Any]) -> dict[str, Any]
     return payload if isinstance(payload, dict) else {"raw": payload}
 
 
+async def get_telnyx_request(path: str) -> dict[str, Any]:
+    if not TELNYX_API_KEY:
+        raise RuntimeError("TELNYX_API_KEY is not configured")
+    url = f"{TELNYX_API_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    headers = {
+        "Authorization": f"Bearer {TELNYX_API_KEY}",
+        "Accept": "application/json",
+    }
+    timeout = httpx.Timeout(15.0, connect=8.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.get(url, headers=headers)
+        if response.is_error:
+            detail = _extract_telnyx_error(response)
+            logger.error("[TELNYX] path=%s status=%s error=%s", path, response.status_code, detail)
+            raise RuntimeError(detail)
+        payload = response.json()
+    logger.info("[TELNYX] path=%s response=%s", path, payload)
+    return payload if isinstance(payload, dict) else {"raw": payload}
+
+
 async def dial_call(body: dict[str, Any]) -> dict[str, Any]:
     return await post_telnyx_request("/calls", body)
+
+
+async def get_call_details(call_control_id: str) -> dict[str, Any]:
+    return await get_telnyx_request(f"/calls/{call_control_id}")
 
 
 async def transfer_call(call_control_id: str, body: dict[str, Any]) -> dict[str, Any]:

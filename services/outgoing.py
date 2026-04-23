@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from outgoing_models import OutgoingCall, OutgoingCallEvent, OutgoingCallerNumber, OutgoingTenantProfile
+from services.telnyx_voice import decode_client_state
 from services.tenants import (
     build_runtime_context,
     get_active_config,
@@ -16,6 +17,21 @@ from services.tenants import (
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def default_outgoing_opening_phrase(display_name: str) -> str:
@@ -328,6 +344,55 @@ def update_outgoing_call_extra(session: Session, call: OutgoingCall, updates: di
             continue
         debug_payload[key] = value
     call.extra_json = debug_payload
+    call.updated_at = _utcnow()
+    session.flush()
+    return call
+
+
+def sync_outgoing_call_from_provider(session: Session, call: OutgoingCall, provider_payload: dict[str, Any]) -> OutgoingCall:
+    data = provider_payload.get("data") if isinstance(provider_payload, dict) else {}
+    if not isinstance(data, dict):
+        return call
+
+    provider_state = dict(call.extra_json or {})
+    client_state = decode_client_state(str(data.get("client_state") or ""))
+    provider_state.update(
+        {
+            "provider_sync_at": _utcnow().isoformat(),
+            "provider_is_alive": bool(data.get("is_alive")),
+            "provider_start_time": str(data.get("start_time") or ""),
+            "provider_end_time": str(data.get("end_time") or ""),
+            "provider_call_duration": data.get("call_duration"),
+            "provider_client_state": client_state,
+        }
+    )
+    call.extra_json = provider_state
+
+    if data.get("call_leg_id") and not call.telnyx_call_leg_id:
+        call.telnyx_call_leg_id = str(data.get("call_leg_id") or "")
+    if data.get("call_session_id") and not call.telnyx_call_session_id:
+        call.telnyx_call_session_id = str(data.get("call_session_id") or "")
+
+    start_time = _parse_iso_datetime(str(data.get("start_time") or ""))
+    end_time = _parse_iso_datetime(str(data.get("end_time") or ""))
+    if start_time and call.started_at is None:
+        call.started_at = start_time
+    if end_time:
+        call.ended_at = end_time
+
+    if bool(data.get("is_alive")):
+        call.updated_at = _utcnow()
+        session.flush()
+        return call
+
+    reason = str(client_state.get("reason") or "").strip().lower()
+    if reason == "machine":
+        call.status = "machine_detected"
+        if not call.last_error:
+            call.last_error = "Telnyx classified the destination answer as a machine/auto-answer and the call was ended before the AI handoff."
+    elif call.status not in {"completed", "failed", "machine_detected"}:
+        call.status = "completed" if call.answered_at else "failed"
+
     call.updated_at = _utcnow()
     session.flush()
     return call

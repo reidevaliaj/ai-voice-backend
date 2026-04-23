@@ -9,6 +9,7 @@
     <h1>Outgoing Calls</h1>
     <p class="muted">{{ tenant.display_name }} · <code>{{ tenant.slug }}</code></p>
     <p class="muted">Use this page to configure the tenant's outbound caller ID, opening phrase, and live Telnyx call launch.</p>
+    <p class="muted">Outbound calls now wait for Telnyx answering-machine detection before the AI handoff. We also capture a short pre-bridge recording so we can inspect what answered if the handset never rings.</p>
     <p>
       {% if telnyx_key_configured %}
       <span class="pill">Telnyx API key loaded</span>
@@ -145,6 +146,8 @@
         <th>Status</th>
         <th>To</th>
         <th>From</th>
+        <th>AMD</th>
+        <th>Recording</th>
         <th>Room</th>
         <th>Error</th>
       </tr>
@@ -156,11 +159,31 @@
         <td>{{ call.status }}</td>
         <td><code>{{ call.target_number }}</code>{% if call.target_name %}<br /><span class="muted">{{ call.target_name }}</span>{% endif %}</td>
         <td><code>{{ call.from_number }}</code></td>
+        <td>
+          {% set amd_result = (call.extra_json or {}).get("amd_result") %}
+          {% if amd_result %}
+          <span class="pill">{{ amd_result }}</span>
+          {% else %}
+          <span class="muted">pending</span>
+          {% endif %}
+        </td>
+        <td>
+          {% set recording_urls = (call.extra_json or {}).get("public_recording_urls") or (call.extra_json or {}).get("recording_urls") or {} %}
+          {% if recording_urls.get("mp3") %}
+          <a href="{{ recording_urls.get('mp3') }}" target="_blank" rel="noreferrer">mp3</a>
+          {% elif recording_urls.get("wav") %}
+          <a href="{{ recording_urls.get('wav') }}" target="_blank" rel="noreferrer">wav</a>
+          {% elif (call.extra_json or {}).get("recording_start_requested") %}
+          <span class="muted">pending</span>
+          {% else %}
+          <span class="muted">-</span>
+          {% endif %}
+        </td>
         <td>{{ call.livekit_room_name or "-" }}</td>
         <td>{{ call.last_error or "-" }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="6" class="muted">No outgoing calls launched yet.</td></tr>
+      <tr><td colspan="8" class="muted">No outgoing calls launched yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>

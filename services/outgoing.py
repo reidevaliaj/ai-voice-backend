@@ -321,6 +321,18 @@ def mark_outgoing_call_status(session: Session, call: OutgoingCall, status: str,
     return call
 
 
+def update_outgoing_call_extra(session: Session, call: OutgoingCall, updates: dict[str, Any]) -> OutgoingCall:
+    debug_payload = dict(call.extra_json or {})
+    for key, value in updates.items():
+        if value is None:
+            continue
+        debug_payload[key] = value
+    call.extra_json = debug_payload
+    call.updated_at = _utcnow()
+    session.flush()
+    return call
+
+
 def save_outgoing_transcript(
     session: Session,
     *,

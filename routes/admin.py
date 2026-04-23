@@ -19,6 +19,7 @@ from app_config import (
     OUTGOING_AGENT_LOG_PATH,
     PUBLIC_BASE_URL,
     TELNYX_API_KEY,
+    TELNYX_OUTGOING_AMD_MODE,
 )
 from db import get_db
 from outgoing_db import get_outgoing_db
@@ -407,6 +408,7 @@ async def outgoing_debug_log(
                     "updated_at": call.updated_at.isoformat() if call.updated_at else "",
                     "telnyx_call_control_id": call.telnyx_call_control_id,
                     "livekit_room_name": call.livekit_room_name,
+                    "extra_json": call.extra_json or {},
                     "last_error": call.last_error,
                 }
                 for call in list_recent_outgoing_calls(outgoing_db, tenant.id)
@@ -519,6 +521,12 @@ async def launch_outgoing_call(
         notes=notes,
         tenant_config_version=active_config.version if active_config else 1,
     )
+    call.extra_json = {
+        **(call.extra_json or {}),
+        "amd_mode": TELNYX_OUTGOING_AMD_MODE,
+        "launch_notes": notes,
+    }
+    outgoing_db.flush()
     client_state = encode_client_state(
         {
             "provider": "telnyx",
@@ -540,6 +548,7 @@ async def launch_outgoing_call(
                 "from_display_name": profile.caller_display_name or tenant.display_name,
                 "webhook_url": f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/telnyx/webhook",
                 "webhook_url_method": "POST",
+                "answering_machine_detection": TELNYX_OUTGOING_AMD_MODE,
                 "client_state": client_state,
                 "command_id": telnyx_command_id("outgoing-dial", call.id),
             }

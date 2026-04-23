@@ -118,5 +118,9 @@ async def transfer_call(call_control_id: str, body: dict[str, Any]) -> dict[str,
     return await post_telnyx_request(f"/calls/{call_control_id}/actions/transfer", body)
 
 
+async def start_recording(call_control_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    return await post_telnyx_request(f"/calls/{call_control_id}/actions/record_start", body)
+
+
 async def hangup_call(call_control_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
     return await post_telnyx_request(f"/calls/{call_control_id}/actions/hangup", body or {})

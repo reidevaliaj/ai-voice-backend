@@ -330,6 +330,9 @@ def save_outgoing_transcript(
 ) -> OutgoingCall:
     call.transcript_text = transcript_text
     call.transcript_json = dict(transcript_payload or {})
+    room_name = str((transcript_payload or {}).get("room_name") or "").strip()
+    if room_name and not call.livekit_room_name:
+        call.livekit_room_name = room_name
     if call.status not in {"completed", "failed"}:
         call.status = "completed"
     if not call.ended_at:
@@ -357,9 +360,6 @@ def build_outgoing_runtime(
     config_version = call.tenant_config_version if call is not None else None
     runtime = build_runtime_context(primary_session, tenant, config_version=config_version)
     profile = ensure_outgoing_profile(outgoing_session, tenant, active_config=active_config)
-    if call is not None and room_name:
-        call.livekit_room_name = room_name
-        outgoing_session.flush()
 
     return {
         "tenant": runtime["tenant"],

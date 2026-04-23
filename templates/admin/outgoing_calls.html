@@ -1,0 +1,229 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="actions" style="margin-bottom: 18px;">
+  <a class="button ghost" href="/admin/tenants/{{ tenant.slug }}">Back to Tenant</a>
+</div>
+
+<div class="grid two">
+  <section class="panel">
+    <h1>Outgoing Calls</h1>
+    <p class="muted">{{ tenant.display_name }} · <code>{{ tenant.slug }}</code></p>
+    <p class="muted">Use this page to configure the tenant's outbound caller ID, opening phrase, and live Telnyx call launch.</p>
+    <p>
+      {% if telnyx_key_configured %}
+      <span class="pill">Telnyx API key loaded</span>
+      {% else %}
+      <span class="pill error">Telnyx API key missing on backend</span>
+      {% endif %}
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>Launch Call</h2>
+    <form method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/calls" class="stack">
+      <div class="row">
+        <div>
+          <label>Phone Number To Call</label>
+          <input type="text" name="target_number" placeholder="+355696031474" required />
+        </div>
+        <div>
+          <label>Contact Name</label>
+          <input type="text" name="target_name" placeholder="Rey" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Caller ID Number</label>
+          <select name="from_number">
+            {% for item in outgoing_numbers %}
+            <option value="{{ item.phone_number }}" {% if item.is_default %}selected{% endif %}>
+              {{ item.phone_number }}{% if item.label %} - {{ item.label }}{% endif %}{% if item.is_default %} (default){% endif %}
+            </option>
+            {% else %}
+            <option value="">Save an outgoing caller ID first</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>Call Notes</label>
+          <input type="text" name="notes" placeholder="Optional context for this one call" />
+        </div>
+      </div>
+      <div class="actions">
+        <button type="submit">Start Outgoing Call</button>
+      </div>
+    </form>
+  </section>
+</div>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Outgoing Configuration</h2>
+  <form method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/config" class="stack">
+    <div class="row">
+      <div>
+        <label>Status</label>
+        <select name="status">
+          <option value="inactive" {% if outgoing_profile_form.status == "inactive" %}selected{% endif %}>inactive</option>
+          <option value="active" {% if outgoing_profile_form.status == "active" %}selected{% endif %}>active</option>
+        </select>
+      </div>
+      <div>
+        <label>Telnyx Voice API Application ID</label>
+        <input type="text" name="telnyx_connection_id" value="{{ outgoing_profile_form.telnyx_connection_id }}" placeholder="2944005866224879060" />
+      </div>
+      <div>
+        <label>Caller Display Name</label>
+        <input type="text" name="caller_display_name" value="{{ outgoing_profile_form.caller_display_name }}" />
+      </div>
+    </div>
+    <div>
+      <label>Opening Phrase</label>
+      <textarea name="opening_phrase">{{ outgoing_profile_form.opening_phrase }}</textarea>
+      <p class="muted">This is the first thing the outgoing agent says once the callee answers and the call is bridged into LiveKit.</p>
+    </div>
+    <div>
+      <label>Outgoing Prompt</label>
+      <textarea name="system_prompt">{{ outgoing_profile_form.system_prompt }}</textarea>
+      <p class="muted">This prompt is specific to outbound calling. It is kept separate from the normal inbound receptionist prompt.</p>
+    </div>
+    <div>
+      <label>Notes</label>
+      <textarea name="notes">{{ outgoing_profile_form.notes }}</textarea>
+    </div>
+    <div class="actions">
+      <button type="submit">Save Outgoing Settings</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Caller ID Numbers</h2>
+  <form method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/numbers" class="stack">
+    <div class="row">
+      <div>
+        <label>Outgoing Number</label>
+        <input type="text" name="phone_number" placeholder="+18382215361" required />
+      </div>
+      <div>
+        <label>Label</label>
+        <input type="text" name="label" value="primary" />
+      </div>
+      <div>
+        <label>Default</label>
+        <div class="checkboxes" style="margin-top: 12px;">
+          <label><input type="checkbox" name="is_default" checked /> Use as default caller ID</label>
+        </div>
+      </div>
+    </div>
+    <div class="actions">
+      <button type="submit">Save Caller ID</button>
+    </div>
+  </form>
+  <table>
+    <thead><tr><th>Number</th><th>Label</th><th>Status</th><th>Default</th></tr></thead>
+    <tbody>
+      {% for item in outgoing_numbers %}
+      <tr>
+        <td><code>{{ item.phone_number }}</code></td>
+        <td>{{ item.label }}</td>
+        <td>{{ item.status }}</td>
+        <td>{% if item.is_default %}<span class="pill">default</span>{% else %}<span class="muted">no</span>{% endif %}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="muted">No outgoing caller IDs saved yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Recent Outgoing Calls</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Created</th>
+        <th>Status</th>
+        <th>To</th>
+        <th>From</th>
+        <th>Room</th>
+        <th>Error</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for call in recent_outgoing_calls %}
+      <tr>
+        <td>{{ call.created_at }}</td>
+        <td>{{ call.status }}</td>
+        <td><code>{{ call.target_number }}</code>{% if call.target_name %}<br /><span class="muted">{{ call.target_name }}</span>{% endif %}</td>
+        <td><code>{{ call.from_number }}</code></td>
+        <td>{{ call.livekit_room_name or "-" }}</td>
+        <td>{{ call.last_error or "-" }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">No outgoing calls launched yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Recent Outgoing Events</h2>
+  {% if recent_outgoing_events %}
+  <pre>{{ recent_outgoing_events | map(attribute='payload_json') | list | tojson(indent=2) }}</pre>
+  {% else %}
+  <p class="muted">No outgoing events logged yet.</p>
+  {% endif %}
+</section>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Outgoing Call Debug</h2>
+  <p class="muted">Source: <code id="outgoing-debug-path">{{ outgoing_agent_debug_log.path }}</code></p>
+  <form method="post" action="/admin/tenants/{{ tenant.slug }}/clear-log" class="actions" style="margin-bottom: 10px;">
+    <input type="hidden" name="log_type" value="outgoing_debug" />
+    <button type="submit" class="secondary">Clear Outgoing Debug Log</button>
+  </form>
+  <pre id="outgoing-debug-log">{{ outgoing_agent_debug_log.content or 'No outgoing debug log content yet.' }}</pre>
+</section>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Outgoing Agent Runtime Log</h2>
+  <p class="muted">Source: <code id="outgoing-runtime-path">{{ outgoing_agent_runtime_log.path }}</code></p>
+  <form method="post" action="/admin/tenants/{{ tenant.slug }}/clear-log" class="actions" style="margin-bottom: 10px;">
+    <input type="hidden" name="log_type" value="outgoing_runtime" />
+    <button type="submit" class="secondary">Clear Outgoing Runtime Log</button>
+  </form>
+  <pre id="outgoing-runtime-log">{{ outgoing_agent_runtime_log.content or 'No outgoing runtime log content yet.' }}</pre>
+</section>
+
+<script>
+  (function () {
+    const debugUrl = "/admin/tenants/{{ tenant.slug }}/outgoing/debug-log";
+    const debugLog = document.getElementById("outgoing-debug-log");
+    const runtimeLog = document.getElementById("outgoing-runtime-log");
+    const debugPath = document.getElementById("outgoing-debug-path");
+    const runtimePath = document.getElementById("outgoing-runtime-path");
+
+    async function refreshDebug() {
+      try {
+        const response = await fetch(debugUrl, { headers: { "X-Requested-With": "fetch" } });
+        if (!response.ok) {
+          return;
+        }
+        const payload = await response.json();
+        if (payload.outgoing_agent_debug_log) {
+          debugLog.textContent = payload.outgoing_agent_debug_log.content || "No outgoing debug log content yet.";
+          debugPath.textContent = payload.outgoing_agent_debug_log.path || "";
+        }
+        if (payload.outgoing_agent_runtime_log) {
+          runtimeLog.textContent = payload.outgoing_agent_runtime_log.content || "No outgoing runtime log content yet.";
+          runtimePath.textContent = payload.outgoing_agent_runtime_log.path || "";
+        }
+      } catch (error) {
+        console.error("Failed to refresh outgoing debug log", error);
+      }
+    }
+
+    setInterval(refreshDebug, 3000);
+  })();
+</script>
+{% endblock %}

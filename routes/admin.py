@@ -8,11 +8,35 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app_config import AGENT_DEBUG_LOG_PATH, AGENT_LOG_PATH, DEBUG_LOG_MAX_CHARS, PUBLIC_BASE_URL
+from app_config import (
+    AGENT_DEBUG_LOG_PATH,
+    AGENT_LOG_PATH,
+    DEBUG_LOG_MAX_CHARS,
+    LIVEKIT_OUTGOING_SIP_PASSWORD,
+    LIVEKIT_OUTGOING_SIP_URI,
+    LIVEKIT_OUTGOING_SIP_USERNAME,
+    OUTGOING_AGENT_DEBUG_LOG_PATH,
+    OUTGOING_AGENT_LOG_PATH,
+    PUBLIC_BASE_URL,
+    TELNYX_API_KEY,
+)
 from db import get_db
+from outgoing_db import get_outgoing_db
 from models import AdminUser, CallEvent, Tenant, TenantPhoneNumber
 from security import decrypt_json, mask_secret, verify_password
 from services.cartesia import get_cartesia_voice_options
+from services.outgoing import (
+    create_outgoing_call,
+    ensure_outgoing_profile,
+    get_default_outgoing_number,
+    list_outgoing_numbers,
+    list_recent_outgoing_calls,
+    list_recent_outgoing_events,
+    outgoing_profile_form_payload,
+    save_outgoing_profile,
+    upsert_outgoing_number,
+)
+from services.telnyx_voice import dial_call, encode_client_state, telnyx_command_id
 from services.tenants import (
     build_runtime_context,
     config_form_payload,
@@ -310,9 +334,230 @@ async def clear_tenant_log(slug: str, request: Request, db: Session = Depends(ge
     elif log_type == "debug":
         _truncate_log(AGENT_DEBUG_LOG_PATH)
         _flash(request, "success", "Live call debug log cleared")
+    elif log_type == "outgoing_runtime":
+        _truncate_log(OUTGOING_AGENT_LOG_PATH)
+        _flash(request, "success", "Outgoing agent runtime log cleared")
+    elif log_type == "outgoing_debug":
+        _truncate_log(OUTGOING_AGENT_DEBUG_LOG_PATH)
+        _flash(request, "success", "Outgoing call debug log cleared")
     else:
         _flash(request, "error", "Unknown log type")
     return RedirectResponse(url=f"/admin/tenants/{slug}", status_code=303)
+
+
+@router.get("/admin/tenants/{slug}/outgoing")
+async def tenant_outgoing_detail(
+    slug: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    active_config = get_active_config(db, tenant.id)
+    profile = ensure_outgoing_profile(outgoing_db, tenant, active_config=active_config)
+    return templates.TemplateResponse(
+        request,
+        "admin/outgoing_calls.html",
+        {
+            "page_title": f"Outgoing Calls - {tenant.display_name}",
+            "tenant": tenant,
+            "config": active_config,
+            "runtime": build_runtime_context(db, tenant) if active_config else None,
+            "outgoing_profile_form": outgoing_profile_form_payload(profile, tenant),
+            "outgoing_numbers": list_outgoing_numbers(outgoing_db, tenant.id),
+            "recent_outgoing_calls": list_recent_outgoing_calls(outgoing_db, tenant.id),
+            "recent_outgoing_events": list_recent_outgoing_events(outgoing_db, tenant.id),
+            "outgoing_agent_debug_log": _read_log_tail(OUTGOING_AGENT_DEBUG_LOG_PATH),
+            "outgoing_agent_runtime_log": _read_log_tail(OUTGOING_AGENT_LOG_PATH),
+            "telnyx_key_configured": bool(TELNYX_API_KEY),
+            "default_outgoing_number": get_default_outgoing_number(outgoing_db, tenant.id),
+            "flash": _consume_flash(request),
+        },
+    )
+
+
+@router.get("/admin/tenants/{slug}/outgoing/debug-log")
+async def outgoing_debug_log(
+    slug: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return JSONResponse(
+        {
+            "ok": True,
+            "tenant": tenant.slug,
+            "outgoing_agent_debug_log": _read_log_tail(OUTGOING_AGENT_DEBUG_LOG_PATH),
+            "outgoing_agent_runtime_log": _read_log_tail(OUTGOING_AGENT_LOG_PATH),
+            "recent_outgoing_calls": [
+                {
+                    "id": call.id,
+                    "status": call.status,
+                    "target_number": call.target_number,
+                    "target_name": call.target_name,
+                    "from_number": call.from_number,
+                    "created_at": call.created_at.isoformat() if call.created_at else "",
+                    "updated_at": call.updated_at.isoformat() if call.updated_at else "",
+                    "telnyx_call_control_id": call.telnyx_call_control_id,
+                    "livekit_room_name": call.livekit_room_name,
+                    "last_error": call.last_error,
+                }
+                for call in list_recent_outgoing_calls(outgoing_db, tenant.id)
+            ],
+        }
+    )
+
+
+@router.post("/admin/tenants/{slug}/outgoing/config")
+async def save_outgoing_config(
+    slug: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    form = await request.form()
+    payload = {
+        "status": str(form.get("status") or "inactive").strip(),
+        "telnyx_connection_id": str(form.get("telnyx_connection_id") or "").strip(),
+        "opening_phrase": str(form.get("opening_phrase") or "").strip(),
+        "system_prompt": str(form.get("system_prompt") or "").strip(),
+        "caller_display_name": str(form.get("caller_display_name") or tenant.display_name).strip(),
+        "notes": str(form.get("notes") or "").strip(),
+    }
+    save_outgoing_profile(outgoing_db, tenant, payload, active_config=get_active_config(db, tenant.id))
+    _flash(request, "success", "Outgoing call settings saved")
+    return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+
+@router.post("/admin/tenants/{slug}/outgoing/numbers")
+async def save_outgoing_number_action(
+    slug: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    form = await request.form()
+    phone_number = normalize_phone_number(str(form.get("phone_number") or ""))
+    label = str(form.get("label") or "primary").strip() or "primary"
+    is_default = form.get("is_default") == "on"
+    if not phone_number:
+        _flash(request, "error", "An outgoing caller ID number is required")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+    upsert_outgoing_number(
+        outgoing_db,
+        tenant,
+        phone_number=phone_number,
+        label=label,
+        is_default=is_default,
+    )
+    _flash(request, "success", f"Outgoing caller ID {phone_number} saved")
+    return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+
+@router.post("/admin/tenants/{slug}/outgoing/calls")
+async def launch_outgoing_call(
+    slug: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    active_config = get_active_config(db, tenant.id)
+    profile = ensure_outgoing_profile(outgoing_db, tenant, active_config=active_config)
+    form = await request.form()
+    target_number = normalize_phone_number(str(form.get("target_number") or ""))
+    target_name = str(form.get("target_name") or "").strip()
+    notes = str(form.get("notes") or "").strip()
+    selected_from_number = normalize_phone_number(str(form.get("from_number") or ""))
+    default_number = get_default_outgoing_number(outgoing_db, tenant.id)
+    from_number = selected_from_number or (default_number.phone_number if default_number else "")
+
+    if not TELNYX_API_KEY:
+        _flash(request, "error", "TELNYX_API_KEY is missing on the backend server")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+    if not (LIVEKIT_OUTGOING_SIP_URI and LIVEKIT_OUTGOING_SIP_USERNAME and LIVEKIT_OUTGOING_SIP_PASSWORD):
+        _flash(request, "error", "The outgoing LiveKit SIP target is not configured on the backend server yet")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+    if not target_number:
+        _flash(request, "error", "A destination phone number is required")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+    if not from_number:
+        _flash(request, "error", "Save at least one outgoing caller ID for this tenant first")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+    if not profile.telnyx_connection_id:
+        _flash(request, "error", "Save the tenant's Telnyx Voice API application ID first")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+    if profile.status != "active":
+        _flash(request, "error", "Set the tenant's outgoing status to active before launching calls")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+    call = create_outgoing_call(
+        outgoing_db,
+        tenant=tenant,
+        profile=profile,
+        target_number=target_number,
+        from_number=from_number,
+        target_name=target_name,
+        notes=notes,
+        tenant_config_version=active_config.version if active_config else 1,
+    )
+    client_state = encode_client_state(
+        {
+            "provider": "telnyx",
+            "mode": "outgoing",
+            "tenant_id": tenant.id,
+            "tenant_slug": tenant.slug,
+            "outgoing_call_id": call.id,
+            "target_number": target_number,
+            "from_number": from_number,
+        }
+    )
+
+    try:
+        result = await dial_call(
+            {
+                "connection_id": profile.telnyx_connection_id,
+                "to": target_number,
+                "from": from_number,
+                "from_display_name": profile.caller_display_name or tenant.display_name,
+                "webhook_url": f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/telnyx/webhook",
+                "webhook_url_method": "POST",
+                "client_state": client_state,
+                "command_id": telnyx_command_id("outgoing-dial", call.id),
+            }
+        )
+        data = result.get("data") or {}
+        call.telnyx_call_control_id = str(data.get("call_control_id") or call.telnyx_call_control_id or "")
+        call.telnyx_call_leg_id = str(data.get("call_leg_id") or call.telnyx_call_leg_id or "")
+        call.telnyx_call_session_id = str(data.get("call_session_id") or call.telnyx_call_session_id or "")
+        call.status = "dialing"
+        outgoing_db.flush()
+        _flash(request, "success", f"Outgoing call started to {target_number}")
+    except Exception as exc:
+        call.status = "failed"
+        call.last_error = str(exc)
+        outgoing_db.flush()
+        _flash(request, "error", f"Could not start the outgoing call: {exc}")
+
+    return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
 
 
 @router.get("/admin/cartesia/voices")

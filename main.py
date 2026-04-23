@@ -21,9 +21,11 @@ from app_config import (
     TELNYX_VOICE_WEBHOOK_PATH,
 )
 from db import db_session
+from outgoing_db import init_outgoing_db
 from routes.admin import router as admin_router
 from routes.agent import router as agent_router
 from routes.events import router as events_router
+from routes.outgoing import router as outgoing_router
 from routes.tools_email import router as email_router
 from routes.zoom_oauth import router as zoom_oauth_router
 from services.bootstrap import ensure_bootstrap_state
@@ -47,12 +49,14 @@ app.include_router(events_router)
 app.include_router(zoom_oauth_router)
 app.include_router(agent_router)
 app.include_router(admin_router)
+app.include_router(outgoing_router)
 
 
 @app.on_event("startup")
 def startup() -> None:
     with db_session() as session:
         ensure_bootstrap_state(session)
+    init_outgoing_db()
 
 
 async def _request_payload(request: Request) -> dict:

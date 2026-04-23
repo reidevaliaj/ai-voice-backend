@@ -160,9 +160,12 @@
         <td><code>{{ call.target_number }}</code>{% if call.target_name %}<br /><span class="muted">{{ call.target_name }}</span>{% endif %}</td>
         <td><code>{{ call.from_number }}</code></td>
         <td>
-          {% set amd_result = (call.extra_json or {}).get("amd_result") %}
+          {% set provider_reason = ((call.extra_json or {}).get("provider_client_state") or {}).get("reason") %}
+          {% set amd_result = (call.extra_json or {}).get("amd_result") or provider_reason %}
           {% if amd_result %}
           <span class="pill">{{ amd_result }}</span>
+          {% elif call.status == "machine_detected" %}
+          <span class="pill">machine</span>
           {% else %}
           <span class="muted">pending</span>
           {% endif %}
@@ -173,6 +176,10 @@
           <a href="{{ recording_urls.get('mp3') }}" target="_blank" rel="noreferrer">mp3</a>
           {% elif recording_urls.get("wav") %}
           <a href="{{ recording_urls.get('wav') }}" target="_blank" rel="noreferrer">wav</a>
+          {% elif (call.extra_json or {}).get("provider_is_alive") is sameas false %}
+          <span class="muted">not available</span>
+          {% elif call.status in ["machine_detected", "completed", "failed"] %}
+          <span class="muted">not available</span>
           {% elif (call.extra_json or {}).get("recording_start_requested") %}
           <span class="muted">pending</span>
           {% else %}

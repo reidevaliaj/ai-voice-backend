@@ -253,7 +253,38 @@
       }
     }
 
-    setInterval(refreshDebug, 3000);
+    const refreshIntervalMs = 10000;
+    let refreshHandle = null;
+
+    function startRefreshLoop() {
+      if (refreshHandle !== null) {
+        return;
+      }
+      refreshHandle = setInterval(() => {
+        if (!document.hidden) {
+          refreshDebug();
+        }
+      }, refreshIntervalMs);
+    }
+
+    function stopRefreshLoop() {
+      if (refreshHandle === null) {
+        return;
+      }
+      clearInterval(refreshHandle);
+      refreshHandle = null;
+    }
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        stopRefreshLoop();
+        return;
+      }
+      refreshDebug();
+      startRefreshLoop();
+    });
+
+    startRefreshLoop();
   })();
 </script>
 {% endblock %}

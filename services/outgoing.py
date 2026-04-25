@@ -11,7 +11,10 @@ from services.telnyx_voice import decode_client_state
 from services.tenants import (
     build_runtime_context,
     get_active_config,
+    normalize_assistant_language,
     normalize_phone_number,
+    normalize_stt_language,
+    normalize_tts_speed,
 )
 
 
@@ -34,17 +37,25 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def default_outgoing_opening_phrase(display_name: str) -> str:
+def default_outgoing_opening_phrase(display_name: str, assistant_language: str = "en") -> str:
     business = (display_name or "our office").strip() or "our office"
+    language = normalize_assistant_language(assistant_language)
+    if language == "it":
+        return f"Buongiorno, la chiamo da {business}. Vorrei parlare con lei per un momento."
+    if language == "de":
+        return f"Guten Tag, hier ist {business}. Ich wollte kurz mit Ihnen sprechen."
     return f"Hello, this is {business} calling. I wanted to speak with you for a moment."
 
 
-def default_outgoing_prompt(display_name: str) -> str:
+def default_outgoing_prompt(display_name: str, assistant_language: str = "en") -> str:
     business = (display_name or "the business").strip() or "the business"
+    language = normalize_assistant_language(assistant_language)
+    language_label = {"en": "English", "it": "Italian", "de": "German"}.get(language, "English")
     return (
         f"You are making an outbound call on behalf of {business}. "
+        f"Speak only in {language_label} unless the callee clearly switches language. "
         "Open with the configured opening phrase, explain why you are calling in a natural way, "
-        "answer follow-up questions accurately using the tenant's configured services and notes, "
+        "use only the outbound call notes and outbound prompt as your source of truth, "
         "and end politely when the callee is done."
     )
 
@@ -54,6 +65,11 @@ def get_outgoing_profile(session: Session, tenant_id: str) -> OutgoingTenantProf
 
 
 def ensure_outgoing_profile(session: Session, tenant: Any, active_config: Any | None = None) -> OutgoingTenantProfile:
+    assistant_language = normalize_assistant_language(getattr(active_config, "assistant_language", "") if active_config else "")
+    stt_language = normalize_stt_language(getattr(active_config, "stt_language", "") if active_config else "", assistant_language)
+    llm_model = str(getattr(active_config, "llm_model", "") or "").strip()
+    tts_voice = str(getattr(active_config, "tts_voice", "") or "").strip()
+    tts_speed = normalize_tts_speed(getattr(active_config, "tts_speed", None))
     profile = get_outgoing_profile(session, tenant.id)
     if profile is None:
         profile = OutgoingTenantProfile(
@@ -62,8 +78,13 @@ def ensure_outgoing_profile(session: Session, tenant: Any, active_config: Any | 
             display_name=tenant.display_name,
             status="inactive",
             telnyx_connection_id="",
-            opening_phrase=default_outgoing_opening_phrase(tenant.display_name),
-            system_prompt=default_outgoing_prompt(tenant.display_name),
+            assistant_language=assistant_language,
+            stt_language=stt_language,
+            llm_model=llm_model,
+            tts_voice=tts_voice,
+            tts_speed=tts_speed,
+            opening_phrase=default_outgoing_opening_phrase(tenant.display_name, assistant_language),
+            system_prompt=default_outgoing_prompt(tenant.display_name, assistant_language),
             caller_display_name=tenant.display_name,
             notes="",
         )
@@ -72,10 +93,26 @@ def ensure_outgoing_profile(session: Session, tenant: Any, active_config: Any | 
     else:
         profile.tenant_slug = tenant.slug
         profile.display_name = tenant.display_name
+        if not profile.assistant_language:
+            profile.assistant_language = assistant_language
+        if not profile.stt_language:
+            profile.stt_language = stt_language
+        if not profile.llm_model:
+            profile.llm_model = llm_model
+        if not profile.tts_voice:
+            profile.tts_voice = tts_voice
+        if not profile.tts_speed:
+            profile.tts_speed = tts_speed
+        old_default_opening = default_outgoing_opening_phrase(tenant.display_name, "en")
+        if profile.opening_phrase == old_default_opening and normalize_assistant_language(profile.assistant_language) != "en":
+            profile.opening_phrase = default_outgoing_opening_phrase(tenant.display_name, profile.assistant_language)
+        old_default_prompt = default_outgoing_prompt(tenant.display_name, "en")
+        if profile.system_prompt == old_default_prompt and normalize_assistant_language(profile.assistant_language) != "en":
+            profile.system_prompt = default_outgoing_prompt(tenant.display_name, profile.assistant_language)
         if not profile.opening_phrase:
-            profile.opening_phrase = default_outgoing_opening_phrase(tenant.display_name)
+            profile.opening_phrase = default_outgoing_opening_phrase(tenant.display_name, profile.assistant_language or assistant_language)
         if not profile.system_prompt:
-            profile.system_prompt = default_outgoing_prompt(tenant.display_name)
+            profile.system_prompt = default_outgoing_prompt(tenant.display_name, profile.assistant_language or assistant_language)
         if not profile.caller_display_name:
             profile.caller_display_name = tenant.display_name
 
@@ -162,10 +199,16 @@ def save_outgoing_profile(
     active_config: Any | None = None,
 ) -> OutgoingTenantProfile:
     profile = ensure_outgoing_profile(session, tenant, active_config=active_config)
+    assistant_language = normalize_assistant_language(str(payload.get("assistant_language") or profile.assistant_language or "en"))
+    profile.assistant_language = assistant_language
+    profile.stt_language = normalize_stt_language(str(payload.get("stt_language") or profile.stt_language or ""), assistant_language)
+    profile.llm_model = str(payload.get("llm_model") or profile.llm_model or "").strip()
+    profile.tts_voice = str(payload.get("tts_voice") or profile.tts_voice or "").strip()
+    profile.tts_speed = normalize_tts_speed(payload.get("tts_speed") if payload.get("tts_speed") not in (None, "") else profile.tts_speed)
     profile.status = str(payload.get("status") or profile.status or "inactive").strip().lower() or "inactive"
     profile.telnyx_connection_id = str(payload.get("telnyx_connection_id") or "").strip()
-    profile.opening_phrase = str(payload.get("opening_phrase") or "").strip() or default_outgoing_opening_phrase(tenant.display_name)
-    profile.system_prompt = str(payload.get("system_prompt") or "").strip() or default_outgoing_prompt(tenant.display_name)
+    profile.opening_phrase = str(payload.get("opening_phrase") or "").strip() or default_outgoing_opening_phrase(tenant.display_name, assistant_language)
+    profile.system_prompt = str(payload.get("system_prompt") or "").strip() or default_outgoing_prompt(tenant.display_name, assistant_language)
     profile.caller_display_name = str(payload.get("caller_display_name") or tenant.display_name).strip() or tenant.display_name
     profile.notes = str(payload.get("notes") or "").strip()
     session.flush()
@@ -174,17 +217,28 @@ def save_outgoing_profile(
 
 def outgoing_profile_form_payload(profile: OutgoingTenantProfile | None, tenant: Any) -> dict[str, Any]:
     if profile is None:
+        assistant_language = "en"
         return {
             "status": "inactive",
             "telnyx_connection_id": "",
-            "opening_phrase": default_outgoing_opening_phrase(tenant.display_name),
-            "system_prompt": default_outgoing_prompt(tenant.display_name),
+            "assistant_language": assistant_language,
+            "stt_language": normalize_stt_language("", assistant_language),
+            "llm_model": "",
+            "tts_voice": "",
+            "tts_speed": 1.0,
+            "opening_phrase": default_outgoing_opening_phrase(tenant.display_name, assistant_language),
+            "system_prompt": default_outgoing_prompt(tenant.display_name, assistant_language),
             "caller_display_name": tenant.display_name,
             "notes": "",
         }
     return {
         "status": profile.status,
         "telnyx_connection_id": profile.telnyx_connection_id,
+        "assistant_language": profile.assistant_language,
+        "stt_language": profile.stt_language,
+        "llm_model": profile.llm_model,
+        "tts_voice": profile.tts_voice,
+        "tts_speed": profile.tts_speed,
         "opening_phrase": profile.opening_phrase,
         "system_prompt": profile.system_prompt,
         "caller_display_name": profile.caller_display_name,
@@ -437,16 +491,31 @@ def build_outgoing_runtime(
     config_version = call.tenant_config_version if call is not None else None
     runtime = build_runtime_context(primary_session, tenant, config_version=config_version)
     profile = ensure_outgoing_profile(outgoing_session, tenant, active_config=active_config)
+    effective_config = dict(runtime["config"])
+    effective_config.update(
+        {
+            "assistant_language": profile.assistant_language or effective_config.get("assistant_language"),
+            "stt_language": profile.stt_language or effective_config.get("stt_language"),
+            "llm_model": profile.llm_model or effective_config.get("llm_model"),
+            "tts_voice": profile.tts_voice or effective_config.get("tts_voice"),
+            "tts_speed": profile.tts_speed if profile.tts_speed else effective_config.get("tts_speed"),
+        }
+    )
 
     return {
         "tenant": runtime["tenant"],
-        "config": runtime["config"],
+        "config": effective_config,
         "outgoing": {
             "profile_id": profile.id,
             "status": profile.status,
             "telnyx_connection_id": profile.telnyx_connection_id,
-            "opening_phrase": (call.opening_phrase if call else profile.opening_phrase) or default_outgoing_opening_phrase(tenant.display_name),
-            "system_prompt": profile.system_prompt or default_outgoing_prompt(tenant.display_name),
+            "assistant_language": profile.assistant_language,
+            "stt_language": profile.stt_language,
+            "llm_model": profile.llm_model,
+            "tts_voice": profile.tts_voice,
+            "tts_speed": profile.tts_speed,
+            "opening_phrase": (call.opening_phrase if call else profile.opening_phrase) or default_outgoing_opening_phrase(tenant.display_name, profile.assistant_language or effective_config.get("assistant_language") or "en"),
+            "system_prompt": profile.system_prompt or default_outgoing_prompt(tenant.display_name, profile.assistant_language or effective_config.get("assistant_language") or "en"),
             "caller_display_name": profile.caller_display_name or tenant.display_name,
             "notes": profile.notes,
         },

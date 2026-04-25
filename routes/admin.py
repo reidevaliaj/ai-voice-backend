@@ -19,6 +19,7 @@ from app_config import (
     OUTGOING_AGENT_LOG_PATH,
     PUBLIC_BASE_URL,
     TELNYX_API_KEY,
+    TELNYX_OUTGOING_HANDOFF_MODE,
     TELNYX_OUTGOING_AMD_MODE,
 )
 from db import get_db
@@ -403,7 +404,10 @@ async def tenant_outgoing_detail(
             "outgoing_agent_debug_log": _read_log_tail(OUTGOING_AGENT_DEBUG_LOG_PATH),
             "outgoing_agent_runtime_log": _read_log_tail(OUTGOING_AGENT_LOG_PATH),
             "telnyx_key_configured": bool(TELNYX_API_KEY),
+            "outgoing_handoff_mode": (TELNYX_OUTGOING_HANDOFF_MODE or "direct").strip().lower(),
             "default_outgoing_number": get_default_outgoing_number(outgoing_db, tenant.id),
+            "language_choices": supported_assistant_languages(),
+            "stt_language_choices": supported_stt_languages(),
             "flash": _consume_flash(request),
         },
     )
@@ -465,6 +469,11 @@ async def save_outgoing_config(
     payload = {
         "status": str(form.get("status") or "inactive").strip(),
         "telnyx_connection_id": str(form.get("telnyx_connection_id") or "").strip(),
+        "assistant_language": str(form.get("assistant_language") or "").strip(),
+        "stt_language": str(form.get("stt_language") or "").strip(),
+        "llm_model": str(form.get("llm_model") or "").strip(),
+        "tts_voice": str(form.get("tts_voice") or "").strip(),
+        "tts_speed": form.get("tts_speed"),
         "opening_phrase": str(form.get("opening_phrase") or "").strip(),
         "system_prompt": str(form.get("system_prompt") or "").strip(),
         "caller_display_name": str(form.get("caller_display_name") or tenant.display_name).strip(),
@@ -556,6 +565,7 @@ async def launch_outgoing_call(
     )
     call.extra_json = {
         **(call.extra_json or {}),
+        "handoff_mode": (TELNYX_OUTGOING_HANDOFF_MODE or "direct").strip().lower(),
         "amd_mode": TELNYX_OUTGOING_AMD_MODE,
         "launch_notes": notes,
     }
@@ -573,19 +583,19 @@ async def launch_outgoing_call(
     )
 
     try:
-        result = await dial_call(
-            {
-                "connection_id": profile.telnyx_connection_id,
-                "to": target_number,
-                "from": from_number,
-                "from_display_name": profile.caller_display_name or tenant.display_name,
-                "webhook_url": f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/telnyx/webhook",
-                "webhook_url_method": "POST",
-                "answering_machine_detection": TELNYX_OUTGOING_AMD_MODE,
-                "client_state": client_state,
-                "command_id": telnyx_command_id("outgoing-dial", call.id),
-            }
-        )
+        dial_payload = {
+            "connection_id": profile.telnyx_connection_id,
+            "to": target_number,
+            "from": from_number,
+            "from_display_name": profile.caller_display_name or tenant.display_name,
+            "webhook_url": f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/telnyx/webhook",
+            "webhook_url_method": "POST",
+            "client_state": client_state,
+            "command_id": telnyx_command_id("outgoing-dial", call.id),
+        }
+        if (TELNYX_OUTGOING_HANDOFF_MODE or "direct").strip().lower() == "amd":
+            dial_payload["answering_machine_detection"] = TELNYX_OUTGOING_AMD_MODE
+        result = await dial_call(dial_payload)
         data = result.get("data") or {}
         call.telnyx_call_control_id = str(data.get("call_control_id") or call.telnyx_call_control_id or "")
         call.telnyx_call_leg_id = str(data.get("call_leg_id") or call.telnyx_call_leg_id or "")

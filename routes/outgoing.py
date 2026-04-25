@@ -15,6 +15,7 @@ from app_config import (
     LIVEKIT_OUTGOING_SIP_USERNAME,
     PUBLIC_BASE_URL,
     TELNYX_API_KEY,
+    TELNYX_OUTGOING_HANDOFF_MODE,
     TELNYX_OUTGOING_AMD_MODE,
     TELNYX_OUTGOING_RECORDING_CHANNELS,
     TELNYX_OUTGOING_RECORDING_FORMAT,
@@ -126,6 +127,11 @@ def _normalized_amd_mode() -> str:
     mode = str(TELNYX_OUTGOING_AMD_MODE or "").strip().lower()
     allowed = {"detect", "detect_beep", "detect_words", "greeting_end", "premium"}
     return mode if mode in allowed else "premium"
+
+
+def _normalized_handoff_mode() -> str:
+    mode = str(TELNYX_OUTGOING_HANDOFF_MODE or "").strip().lower()
+    return mode if mode in {"direct", "amd"} else "direct"
 
 
 def _is_human_detection_result(result: str) -> bool:
@@ -405,13 +411,13 @@ async def telnyx_outgoing_webhook(
             "last_event_at": str(event_payload.get("occurred_at") or event_payload.get("Timestamp") or ""),
             "last_event_id": str(event_payload.get("event_id") or ""),
             "last_event_result": str(event_payload.get("result") or ""),
+            "handoff_mode": _normalized_handoff_mode(),
             "amd_mode": _normalized_amd_mode(),
         },
     )
 
     if event_type == "call.answered" and _is_primary_pstn_leg(call, event_payload):
         if call.status not in {"livekit_transfer_requested", "bridged", "completed", "failed"}:
-            mark_outgoing_call_status(outgoing_db, call, "awaiting_machine_detection")
             update_outgoing_call_extra(
                 outgoing_db,
                 call,
@@ -420,6 +426,30 @@ async def telnyx_outgoing_webhook(
                     "target_answer_state": str(event_payload.get("state") or ""),
                 },
             )
+            if _normalized_handoff_mode() == "direct":
+                try:
+                    mark_outgoing_call_status(outgoing_db, call, "human_detected")
+                    await _request_livekit_transfer(
+                        db=db,
+                        outgoing_db=outgoing_db,
+                        tenant=tenant,
+                        call=call,
+                        amd_result="direct_answer",
+                    )
+                except Exception as exc:
+                    logger.exception("[TELNYX_OUTGOING] direct transfer failed call=%s", call.id)
+                    mark_outgoing_call_error(outgoing_db, call, str(exc))
+                    update_outgoing_call_extra(
+                        outgoing_db,
+                        call,
+                        {
+                            "transfer_error": str(exc),
+                            "transfer_error_at": str(event_payload.get("occurred_at") or event_payload.get("Timestamp") or ""),
+                        },
+                    )
+                return JSONResponse({"ok": True, "handled": event_type or "logged", "call_id": call.id})
+
+            mark_outgoing_call_status(outgoing_db, call, "awaiting_machine_detection")
             try:
                 await _ensure_primary_leg_recording(call, tenant, outgoing_db)
             except Exception as exc:
@@ -435,7 +465,11 @@ async def telnyx_outgoing_webhook(
                 )
                 outgoing_db.flush()
 
-    elif event_type in {"call.machine.detection.ended", "call.machine.premium.detection.ended"} and _is_primary_pstn_leg(call, event_payload):
+    elif (
+        _normalized_handoff_mode() == "amd"
+        and event_type in {"call.machine.detection.ended", "call.machine.premium.detection.ended"}
+        and _is_primary_pstn_leg(call, event_payload)
+    ):
         amd_result = str(event_payload.get("result") or "").strip().lower()
         if not _current_debug_state(call).get("recording_start_requested"):
             try:
@@ -520,7 +554,11 @@ async def telnyx_outgoing_webhook(
                 {"amd_unknown_result": amd_result or "missing"},
             )
 
-    elif event_type in {"call.machine.greeting.ended", "call.machine.premium.greeting.ended"} and _is_primary_pstn_leg(call, event_payload):
+    elif (
+        _normalized_handoff_mode() == "amd"
+        and event_type in {"call.machine.greeting.ended", "call.machine.premium.greeting.ended"}
+        and _is_primary_pstn_leg(call, event_payload)
+    ):
         update_outgoing_call_extra(
             outgoing_db,
             call,
@@ -530,7 +568,7 @@ async def telnyx_outgoing_webhook(
             },
         )
 
-    elif event_type == "call.recording.saved" and _is_primary_pstn_leg(call, event_payload):
+    elif _normalized_handoff_mode() == "amd" and event_type == "call.recording.saved" and _is_primary_pstn_leg(call, event_payload):
         update_outgoing_call_extra(
             outgoing_db,
             call,
@@ -544,7 +582,7 @@ async def telnyx_outgoing_webhook(
             },
         )
 
-    elif event_type == "call.recording.error" and _is_primary_pstn_leg(call, event_payload):
+    elif _normalized_handoff_mode() == "amd" and event_type == "call.recording.error" and _is_primary_pstn_leg(call, event_payload):
         error_text = str(event_payload.get("error") or event_payload.get("detail") or "Recording error").strip()
         call.last_error = error_text
         update_outgoing_call_extra(

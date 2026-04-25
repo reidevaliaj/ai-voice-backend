@@ -1,6 +1,6 @@
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app_config import OUTGOING_DATABASE_URL
@@ -30,6 +30,30 @@ def init_outgoing_db() -> None:
     from outgoing_models import OutgoingBase as ModelsBase
 
     ModelsBase.metadata.create_all(bind=outgoing_engine)
+    _upgrade_outgoing_schema()
+
+
+def _upgrade_outgoing_schema() -> None:
+    inspector = inspect(outgoing_engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("outgoing_tenant_profiles")}
+    except Exception:
+        return
+
+    pending_columns = {
+        "assistant_language": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN assistant_language VARCHAR(16) NOT NULL DEFAULT ''",
+        "stt_language": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN stt_language VARCHAR(16) NOT NULL DEFAULT ''",
+        "llm_model": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN llm_model VARCHAR(128) NOT NULL DEFAULT ''",
+        "tts_voice": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN tts_voice VARCHAR(128) NOT NULL DEFAULT ''",
+        "tts_speed": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN tts_speed FLOAT NOT NULL DEFAULT 1.0",
+    }
+    missing = [statement for name, statement in pending_columns.items() if name not in columns]
+    if not missing:
+        return
+
+    with outgoing_engine.begin() as connection:
+        for statement in missing:
+            connection.execute(text(statement))
 
 
 @contextmanager

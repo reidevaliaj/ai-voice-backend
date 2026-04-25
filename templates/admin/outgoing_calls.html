@@ -9,13 +9,14 @@
     <h1>Outgoing Calls</h1>
     <p class="muted">{{ tenant.display_name }} · <code>{{ tenant.slug }}</code></p>
     <p class="muted">Use this page to configure the tenant's outbound caller ID, opening phrase, and live Telnyx call launch.</p>
-    <p class="muted">Outbound calls now wait for Telnyx answering-machine detection before the AI handoff. We also capture a short pre-bridge recording so we can inspect what answered if the handset never rings.</p>
+    <p class="muted">Outbound calls now hand off directly into LiveKit as soon as the callee answers, so the AI connects immediately instead of waiting for Telnyx machine detection.</p>
     <p>
       {% if telnyx_key_configured %}
       <span class="pill">Telnyx API key loaded</span>
       {% else %}
       <span class="pill error">Telnyx API key missing on backend</span>
       {% endif %}
+      <span class="pill">handoff: {{ outgoing_handoff_mode }}</span>
     </p>
   </section>
 
@@ -73,23 +74,54 @@
         <input type="text" name="telnyx_connection_id" value="{{ outgoing_profile_form.telnyx_connection_id }}" placeholder="2944005866224879060" />
       </div>
       <div>
+        <label>Outgoing Language</label>
+        <select name="assistant_language">
+          {% for item in language_choices %}
+          <option value="{{ item.code }}" {% if outgoing_profile_form.assistant_language == item.code %}selected{% endif %}>{{ item.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
         <label>Caller Display Name</label>
         <input type="text" name="caller_display_name" value="{{ outgoing_profile_form.caller_display_name }}" />
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Outgoing STT Language</label>
+        <select name="stt_language">
+          {% for item in stt_language_choices %}
+          <option value="{{ item.code }}" {% if outgoing_profile_form.stt_language == item.code %}selected{% endif %}>{{ item.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Outgoing LLM Model</label>
+        <input type="text" name="llm_model" value="{{ outgoing_profile_form.llm_model }}" placeholder="gpt-4.1-mini" />
+      </div>
+      <div>
+        <label>Outgoing Cartesia Voice</label>
+        <input type="text" name="tts_voice" value="{{ outgoing_profile_form.tts_voice }}" placeholder="Voice ID" />
+      </div>
+      <div>
+        <label>Outgoing Cartesia Speed</label>
+        <input type="number" name="tts_speed" min="0.6" max="1.5" step="0.05" value="{{ outgoing_profile_form.tts_speed }}" />
       </div>
     </div>
     <div>
       <label>Opening Phrase</label>
       <textarea name="opening_phrase">{{ outgoing_profile_form.opening_phrase }}</textarea>
-      <p class="muted">This is the first thing the outgoing agent says once the callee answers and the call is bridged into LiveKit.</p>
+      <p class="muted">This is the first thing the outgoing agent says once the callee answers and the call is bridged into LiveKit. It is fully separate from the inbound receptionist greeting.</p>
     </div>
     <div>
       <label>Outgoing Prompt</label>
       <textarea name="system_prompt">{{ outgoing_profile_form.system_prompt }}</textarea>
-      <p class="muted">This prompt is specific to outbound calling. It is kept separate from the normal inbound receptionist prompt.</p>
+      <p class="muted">This prompt is the outbound agent's source of truth. It is now kept separate from the inbound receptionist prompt, services, and FAQ runtime.</p>
     </div>
     <div>
-      <label>Notes</label>
+      <label>Outbound Notes / Knowledge</label>
       <textarea name="notes">{{ outgoing_profile_form.notes }}</textarea>
+      <p class="muted">Use this for outbound-specific context or what the caller should be told. The outbound agent will use this instead of borrowing the inbound tenant script.</p>
     </div>
     <div class="actions">
       <button type="submit">Save Outgoing Settings</button>
@@ -146,7 +178,7 @@
         <th>Status</th>
         <th>To</th>
         <th>From</th>
-        <th>AMD</th>
+        <th>Detection</th>
         <th>Recording</th>
         <th>Room</th>
         <th>Error</th>
@@ -160,9 +192,12 @@
         <td><code>{{ call.target_number }}</code>{% if call.target_name %}<br /><span class="muted">{{ call.target_name }}</span>{% endif %}</td>
         <td><code>{{ call.from_number }}</code></td>
         <td>
+          {% set handoff_mode = (call.extra_json or {}).get("handoff_mode") or outgoing_handoff_mode %}
           {% set provider_reason = ((call.extra_json or {}).get("provider_client_state") or {}).get("reason") %}
           {% set amd_result = (call.extra_json or {}).get("amd_result") or provider_reason %}
-          {% if amd_result %}
+          {% if handoff_mode == "direct" %}
+          <span class="pill">direct</span>
+          {% elif amd_result %}
           <span class="pill">{{ amd_result }}</span>
           {% elif call.status == "machine_detected" %}
           <span class="pill">machine</span>
@@ -172,7 +207,9 @@
         </td>
         <td>
           {% set recording_urls = (call.extra_json or {}).get("public_recording_urls") or (call.extra_json or {}).get("recording_urls") or {} %}
-          {% if recording_urls.get("mp3") %}
+          {% if handoff_mode == "direct" %}
+          <span class="muted">disabled</span>
+          {% elif recording_urls.get("mp3") %}
           <a href="{{ recording_urls.get('mp3') }}" target="_blank" rel="noreferrer">mp3</a>
           {% elif recording_urls.get("wav") %}
           <a href="{{ recording_urls.get('wav') }}" target="_blank" rel="noreferrer">wav</a>

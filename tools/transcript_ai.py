@@ -62,6 +62,23 @@ def _fallback_result() -> Dict[str, Any]:
     }
 
 
+def _fallback_outgoing_result() -> Dict[str, Any]:
+    return {
+        "summary": "",
+        "contact_name": "",
+        "contact_email": "",
+        "contact_phone": "",
+        "interest_status": "unclear",
+        "interested": False,
+        "callback_requested": False,
+        "callback_time_window": "",
+        "consultation_time_window": "",
+        "next_step": "",
+        "objections": "",
+        "confidence": 0.0,
+    }
+
+
 def _user_lines_from_transcript(transcript: str) -> list[str]:
     lines: list[str] = []
     for raw_line in (transcript or "").splitlines():
@@ -175,6 +192,90 @@ case_reason, preferred_time_window, problem_description, confidence
     result["meeting_requested"] = bool(result.get("meeting_requested", False))
     result["meeting_confirmed"] = bool(result.get("meeting_confirmed", False))
     result["case_reported"] = bool(result.get("case_reported", False))
+    return result
+
+
+def analyze_outgoing_transcript(
+    transcript: str,
+    messages: List[Dict[str, Any]],
+    current_time_utc_iso: str = "",
+    business_timezone: str = "Europe/Budapest",
+    business_context: Dict[str, Any] | None = None,
+    outgoing_context: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    result = _fallback_outgoing_result()
+    if not transcript.strip() or not OPENAI_API_KEY:
+        return result
+
+    system_prompt = """
+You are a strict JSON-only analysis engine for outbound sales and consultation phone calls.
+Return STRICT JSON only.
+
+Decide whether the callee is genuinely interested, clearly not interested, or if the result is still unclear.
+Extract the best callback or consultation time window only if the callee actually mentioned one.
+Do not invent facts.
+
+Required JSON fields:
+summary, contact_name, contact_email, contact_phone, interest_status, interested,
+callback_requested, callback_time_window, consultation_time_window, next_step, objections, confidence
+
+Rules:
+- interest_status must be one of: interested, not_interested, unclear
+- interested must be true only when the callee showed real interest or agreed to continue later
+- callback_requested is true only when the callee explicitly asked to be called later or asked for a later consultation call
+- consultation_time_window should capture when they are available for a consultation/callback, in natural language if needed
+- next_step should be a short operational outcome like "follow up tomorrow afternoon", "send WhatsApp summary", or "no follow-up requested"
+- objections should briefly list the main resistance or concern if present, otherwise empty string
+""".strip()
+
+    user_payload = {
+        "transcript": transcript,
+        "messages": messages,
+        "current_time_utc_iso": current_time_utc_iso,
+        "business_timezone": business_timezone,
+        "business_context": business_context or {},
+        "outgoing_context": outgoing_context or {},
+    }
+
+    body = {
+        "model": OPENAI_MODEL,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ],
+    }
+
+    req = request.Request(
+        OPENAI_URL,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+        data = json.loads(raw)
+        content = data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            result.update(parsed)
+    except Exception:
+        logger.exception("OpenAI outgoing transcript analysis failed")
+        return result
+
+    result["contact_email"] = _normalize_email(str(result.get("contact_email", "")))
+    interest_status = str(result.get("interest_status", "unclear") or "unclear").strip().lower()
+    if interest_status not in {"interested", "not_interested", "unclear"}:
+        interest_status = "unclear"
+    result["interest_status"] = interest_status
+    result["interested"] = bool(result.get("interested", False) or interest_status == "interested")
+    result["callback_requested"] = bool(result.get("callback_requested", False))
     return result
 
 

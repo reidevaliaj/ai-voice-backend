@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from outgoing_models import OutgoingCall, OutgoingCallEvent, OutgoingCallerNumber, OutgoingTenantProfile
@@ -12,6 +12,7 @@ from services.tenants import (
     build_runtime_context,
     get_active_config,
     normalize_assistant_language,
+    normalize_endpointing_window,
     normalize_phone_number,
     normalize_stt_language,
     normalize_tts_speed,
@@ -70,6 +71,10 @@ def ensure_outgoing_profile(session: Session, tenant: Any, active_config: Any | 
     llm_model = str(getattr(active_config, "llm_model", "") or "").strip()
     tts_voice = str(getattr(active_config, "tts_voice", "") or "").strip()
     tts_speed = normalize_tts_speed(getattr(active_config, "tts_speed", None))
+    min_endpointing_delay, max_endpointing_delay = normalize_endpointing_window(
+        getattr(active_config, "min_endpointing_delay", 0.3) if active_config else 0.3,
+        getattr(active_config, "max_endpointing_delay", 1.2) if active_config else 1.2,
+    )
     profile = get_outgoing_profile(session, tenant.id)
     if profile is None:
         profile = OutgoingTenantProfile(
@@ -83,6 +88,8 @@ def ensure_outgoing_profile(session: Session, tenant: Any, active_config: Any | 
             llm_model=llm_model,
             tts_voice=tts_voice,
             tts_speed=tts_speed,
+            min_endpointing_delay=min_endpointing_delay,
+            max_endpointing_delay=max_endpointing_delay,
             opening_phrase=default_outgoing_opening_phrase(tenant.display_name, assistant_language),
             system_prompt=default_outgoing_prompt(tenant.display_name, assistant_language),
             caller_display_name=tenant.display_name,
@@ -103,6 +110,10 @@ def ensure_outgoing_profile(session: Session, tenant: Any, active_config: Any | 
             profile.tts_voice = tts_voice
         if not profile.tts_speed:
             profile.tts_speed = tts_speed
+        if not profile.min_endpointing_delay:
+            profile.min_endpointing_delay = min_endpointing_delay
+        if not profile.max_endpointing_delay:
+            profile.max_endpointing_delay = max_endpointing_delay
         old_default_opening = default_outgoing_opening_phrase(tenant.display_name, "en")
         if profile.opening_phrase == old_default_opening and normalize_assistant_language(profile.assistant_language) != "en":
             profile.opening_phrase = default_outgoing_opening_phrase(tenant.display_name, profile.assistant_language)
@@ -200,11 +211,17 @@ def save_outgoing_profile(
 ) -> OutgoingTenantProfile:
     profile = ensure_outgoing_profile(session, tenant, active_config=active_config)
     assistant_language = normalize_assistant_language(str(payload.get("assistant_language") or profile.assistant_language or "en"))
+    min_endpointing_delay, max_endpointing_delay = normalize_endpointing_window(
+        payload.get("min_endpointing_delay") if payload.get("min_endpointing_delay") not in (None, "") else profile.min_endpointing_delay,
+        payload.get("max_endpointing_delay") if payload.get("max_endpointing_delay") not in (None, "") else profile.max_endpointing_delay,
+    )
     profile.assistant_language = assistant_language
     profile.stt_language = normalize_stt_language(str(payload.get("stt_language") or profile.stt_language or ""), assistant_language)
     profile.llm_model = str(payload.get("llm_model") or profile.llm_model or "").strip()
     profile.tts_voice = str(payload.get("tts_voice") or profile.tts_voice or "").strip()
     profile.tts_speed = normalize_tts_speed(payload.get("tts_speed") if payload.get("tts_speed") not in (None, "") else profile.tts_speed)
+    profile.min_endpointing_delay = min_endpointing_delay
+    profile.max_endpointing_delay = max_endpointing_delay
     profile.status = str(payload.get("status") or profile.status or "inactive").strip().lower() or "inactive"
     profile.telnyx_connection_id = str(payload.get("telnyx_connection_id") or "").strip()
     profile.opening_phrase = str(payload.get("opening_phrase") or "").strip() or default_outgoing_opening_phrase(tenant.display_name, assistant_language)
@@ -226,6 +243,8 @@ def outgoing_profile_form_payload(profile: OutgoingTenantProfile | None, tenant:
             "llm_model": "",
             "tts_voice": "",
             "tts_speed": 1.0,
+            "min_endpointing_delay": 0.3,
+            "max_endpointing_delay": 1.2,
             "opening_phrase": default_outgoing_opening_phrase(tenant.display_name, assistant_language),
             "system_prompt": default_outgoing_prompt(tenant.display_name, assistant_language),
             "caller_display_name": tenant.display_name,
@@ -239,6 +258,8 @@ def outgoing_profile_form_payload(profile: OutgoingTenantProfile | None, tenant:
         "llm_model": profile.llm_model,
         "tts_voice": profile.tts_voice,
         "tts_speed": profile.tts_speed,
+        "min_endpointing_delay": profile.min_endpointing_delay,
+        "max_endpointing_delay": profile.max_endpointing_delay,
         "opening_phrase": profile.opening_phrase,
         "system_prompt": profile.system_prompt,
         "caller_display_name": profile.caller_display_name,
@@ -317,6 +338,14 @@ def list_recent_outgoing_events(session: Session, tenant_id: str, limit: int = 4
         .limit(limit)
     )
     return list(session.scalars(stmt))
+
+
+def clear_outgoing_events(session: Session, tenant_id: str) -> int:
+    result = session.execute(
+        delete(OutgoingCallEvent).where(OutgoingCallEvent.tenant_id == tenant_id)
+    )
+    session.flush()
+    return int(result.rowcount or 0)
 
 
 def log_outgoing_event(
@@ -492,6 +521,10 @@ def build_outgoing_runtime(
     runtime = build_runtime_context(primary_session, tenant, config_version=config_version)
     profile = ensure_outgoing_profile(outgoing_session, tenant, active_config=active_config)
     effective_config = dict(runtime["config"])
+    profile_min_endpointing_delay, profile_max_endpointing_delay = normalize_endpointing_window(
+        profile.min_endpointing_delay,
+        profile.max_endpointing_delay,
+    )
     effective_config.update(
         {
             "assistant_language": profile.assistant_language or effective_config.get("assistant_language"),
@@ -499,6 +532,8 @@ def build_outgoing_runtime(
             "llm_model": profile.llm_model or effective_config.get("llm_model"),
             "tts_voice": profile.tts_voice or effective_config.get("tts_voice"),
             "tts_speed": profile.tts_speed if profile.tts_speed else effective_config.get("tts_speed"),
+            "min_endpointing_delay": profile_min_endpointing_delay,
+            "max_endpointing_delay": profile_max_endpointing_delay,
         }
     )
 
@@ -514,6 +549,8 @@ def build_outgoing_runtime(
             "llm_model": profile.llm_model,
             "tts_voice": profile.tts_voice,
             "tts_speed": profile.tts_speed,
+            "min_endpointing_delay": profile_min_endpointing_delay,
+            "max_endpointing_delay": profile_max_endpointing_delay,
             "opening_phrase": (call.opening_phrase if call else profile.opening_phrase) or default_outgoing_opening_phrase(tenant.display_name, profile.assistant_language or effective_config.get("assistant_language") or "en"),
             "system_prompt": profile.system_prompt or default_outgoing_prompt(tenant.display_name, profile.assistant_language or effective_config.get("assistant_language") or "en"),
             "caller_display_name": profile.caller_display_name or tenant.display_name,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -45,6 +46,9 @@ from services.telnyx_voice import (
     transfer_call,
 )
 from services.tenants import get_tenant_by_id, get_tenant_by_slug, normalize_phone_number
+from tools.email_resend import send_email_resend
+from tools.storage import append_event
+from tools.transcript_ai import analyze_outgoing_transcript
 
 logger = logging.getLogger("outgoing")
 
@@ -132,6 +136,96 @@ def _normalized_amd_mode() -> str:
 def _normalized_handoff_mode() -> str:
     mode = str(TELNYX_OUTGOING_HANDOFF_MODE or "").strip().lower()
     return mode if mode in {"direct", "amd"} else "direct"
+
+
+def _format_timestamp(ts: int | None) -> str:
+    if not ts:
+        return ""
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _to_html(text: str) -> str:
+    return (text or "").replace("\n", "<br/>")
+
+
+def _email_targets_from_runtime(runtime: dict[str, Any]) -> list[str]:
+    config = runtime["config"]
+    email_settings = runtime["integrations"]["email"].get("settings") or {}
+    config_targets = [item for item in config.get("notification_targets") or [] if item]
+    integration_targets = [item for item in email_settings.get("notification_targets") or [] if item]
+    targets = list(config_targets or integration_targets)
+    owner_email = str(config.get("owner_email") or "").strip()
+    if owner_email and owner_email not in targets:
+        targets.append(owner_email)
+    return [item for item in targets if item]
+
+
+def _send_outgoing_email_summary(
+    *,
+    payload: OutgoingTranscriptPayload,
+    analysis: dict[str, Any],
+    runtime: dict[str, Any],
+    call: Any,
+) -> dict[str, Any]:
+    config = runtime["config"]
+    email_settings = runtime["integrations"]["email"].get("settings") or {}
+    targets = _email_targets_from_runtime(runtime)
+    subject = (
+        f"[AI Voice] {config['business_name']} outgoing call summary - "
+        f"{analysis.get('interest_status') or 'unclear'}"
+    )
+    html = f"""
+    <h3>Outgoing Call Summary</h3>
+    <p><b>Tenant:</b> {runtime['tenant']['slug']}</p>
+    <p><b>Business:</b> {config['business_name']}</p>
+    <p><b>Interested:</b> {analysis.get('interest_status', 'unclear')}</p>
+    <p><b>Consultation / callback time:</b> {analysis.get('consultation_time_window', '') or analysis.get('callback_time_window', '')}</p>
+    <p><b>Next step:</b> {_to_html(str(analysis.get('next_step', '')))}</p>
+    <p><b>Objections:</b> {_to_html(str(analysis.get('objections', '')))}</p>
+    <p><b>Summary:</b> {_to_html(str(analysis.get('summary', '')))}</p>
+    <p><b>Contact name:</b> {analysis.get('contact_name', '') or call.target_name or ''}</p>
+    <p><b>Contact email:</b> {analysis.get('contact_email', '')}</p>
+    <p><b>Contact phone:</b> {analysis.get('contact_phone', '') or call.target_number}</p>
+    <p><b>To:</b> {call.target_number}</p>
+    <p><b>From:</b> {call.from_number}</p>
+    <p><b>Room:</b> {payload.room_name or ''}</p>
+    <p><b>Call timestamp (UTC):</b> {_format_timestamp(payload.timestamp)}</p>
+    <hr/>
+    <p><b>Full transcript:</b></p>
+    <p>{_to_html(payload.transcript)}</p>
+    """
+    sent_to: list[str] = []
+    results: list[dict[str, Any]] = []
+    from_email = str(email_settings.get("from_email") or config.get("from_email") or config.get("owner_email") or "noreply@example.com")
+    reply_to = str(email_settings.get("reply_to_email") or config.get("reply_to_email") or config.get("owner_email") or "")
+    for target in targets:
+        result = send_email_resend(
+            to=target,
+            subject=subject,
+            html=html,
+            from_email=from_email,
+            reply_to=reply_to,
+            tags=[{"name": "tool", "value": "outgoing-email-summary"}],
+        )
+        sent_to.append(target)
+        results.append({"to": target, "result": result})
+    email_event = {
+        "tenant_id": payload.tenant_id or runtime["tenant"]["id"],
+        "tenant_slug": runtime["tenant"]["slug"],
+        "outgoing_call_id": call.id,
+        "room_name": payload.room_name,
+        "timestamp": payload.timestamp,
+        "subject": subject,
+        "from_email": from_email,
+        "reply_to": reply_to,
+        "targets": sent_to,
+        "interest_status": analysis.get("interest_status", "unclear"),
+        "consultation_time_window": analysis.get("consultation_time_window", ""),
+        "callback_time_window": analysis.get("callback_time_window", ""),
+        "results": results,
+    }
+    append_event("outgoing_email_summary_events.jsonl", email_event)
+    return email_event
 
 
 def _is_human_detection_result(result: str) -> bool:
@@ -351,6 +445,83 @@ async def outgoing_transcript_event(
         call=call,
         room_name=payload.room_name,
     )
+    if tenant is None:
+        tenant = get_tenant_by_id(db, call.tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found for outgoing transcript")
+
+    runtime = build_outgoing_runtime(
+        db,
+        outgoing_db,
+        tenant=tenant,
+        call_control_id=call.telnyx_call_control_id,
+        outgoing_call_id=call.id,
+        room_name=payload.room_name,
+    )
+    analysis = analyze_outgoing_transcript(
+        payload.transcript,
+        payload.messages,
+        current_time_utc_iso=_format_timestamp(payload.timestamp),
+        business_timezone=runtime["config"]["timezone"],
+        business_context={
+            "business_name": runtime["config"]["business_name"],
+            "assistant_language": runtime["outgoing"].get("assistant_language") or runtime["config"]["assistant_language"],
+        },
+        outgoing_context={
+            "opening_phrase": runtime["outgoing"].get("opening_phrase", ""),
+            "system_prompt": runtime["outgoing"].get("system_prompt", ""),
+            "notes": runtime["outgoing"].get("notes", ""),
+            "target_name": runtime["call"].get("target_name", ""),
+            "target_number": runtime["call"].get("target_number", ""),
+        },
+    )
+    update_outgoing_call_extra(
+        outgoing_db,
+        call,
+        {
+            "outgoing_transcript_analysis": analysis,
+            "interest_status": str(analysis.get("interest_status") or "unclear"),
+            "interested": bool(analysis.get("interested", False)),
+            "callback_requested": bool(analysis.get("callback_requested", False)),
+            "callback_time_window": str(analysis.get("callback_time_window") or ""),
+            "consultation_time_window": str(analysis.get("consultation_time_window") or ""),
+            "next_step": str(analysis.get("next_step") or ""),
+            "objections": str(analysis.get("objections") or ""),
+        },
+    )
+    analysis_event = {
+        "tenant_id": call.tenant_id,
+        "tenant_slug": call.tenant_slug,
+        "outgoing_call_id": call.id,
+        "room_name": payload.room_name,
+        "analysis": analysis,
+    }
+    append_event("outgoing_transcript_analysis_events.jsonl", analysis_event)
+    log_outgoing_event(
+        outgoing_db,
+        tenant_id=call.tenant_id,
+        tenant_slug=call.tenant_slug,
+        event_type="outgoing_transcript_analysis",
+        payload=analysis_event,
+        call=call,
+        room_name=payload.room_name,
+    )
+    if runtime["config"]["enabled_tools"].get("email_summary", True):
+        email_event = _send_outgoing_email_summary(
+            payload=payload,
+            analysis=analysis,
+            runtime=runtime,
+            call=call,
+        )
+        log_outgoing_event(
+            outgoing_db,
+            tenant_id=call.tenant_id,
+            tenant_slug=call.tenant_slug,
+            event_type="outgoing_email_summary_sent",
+            payload=email_event,
+            call=call,
+            room_name=payload.room_name,
+        )
     return {"ok": True, "call_id": call.id}
 
 

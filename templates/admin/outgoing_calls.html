@@ -101,11 +101,42 @@
       </div>
       <div>
         <label>Outgoing Cartesia Voice</label>
-        <input type="text" name="tts_voice" value="{{ outgoing_profile_form.tts_voice }}" placeholder="Voice ID" />
+        <select name="tts_voice" id="tts-voice-select" data-selected-voice="{{ outgoing_profile_form.tts_voice }}">
+          {% if cartesia_voice_options %}
+            {% for voice in cartesia_voice_options %}
+            <option value="{{ voice.id }}" {% if voice.id == outgoing_profile_form.tts_voice %}selected{% endif %}>
+              {{ voice.name }}{% if voice.gender %} - {{ voice.gender }}{% endif %}
+            </option>
+            {% endfor %}
+          {% elif outgoing_profile_form.tts_voice %}
+            <option value="{{ outgoing_profile_form.tts_voice }}" selected>{{ outgoing_profile_form.tts_voice }}</option>
+          {% else %}
+            <option value="">Select a preferred voice</option>
+          {% endif %}
+        </select>
+        <p class="muted" id="tts-voice-status">
+          {% if cartesia_voice_error %}
+          {{ cartesia_voice_error }}
+          {% else %}
+          Voices are loaded live from Cartesia and filtered by the selected outgoing language.
+          {% endif %}
+        </p>
       </div>
       <div>
         <label>Outgoing Cartesia Speed</label>
         <input type="number" name="tts_speed" min="0.6" max="1.5" step="0.05" value="{{ outgoing_profile_form.tts_speed }}" />
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Minimum Endpointing Delay</label>
+        <input type="number" name="min_endpointing_delay" min="0.1" max="6.0" step="0.05" value="{{ outgoing_profile_form.min_endpointing_delay }}" />
+        <p class="muted">Suggested faster phone value: 0.30 seconds.</p>
+      </div>
+      <div>
+        <label>Maximum Endpointing Delay</label>
+        <input type="number" name="max_endpointing_delay" min="0.1" max="6.0" step="0.05" value="{{ outgoing_profile_form.max_endpointing_delay }}" />
+        <p class="muted">Suggested faster phone cap: 1.20 seconds.</p>
       </div>
     </div>
     <div>
@@ -235,6 +266,9 @@
 
 <section class="panel" style="margin-top: 18px;">
   <h2>Recent Outgoing Events</h2>
+  <form method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/events/clear" class="actions" style="margin-bottom: 10px;">
+    <button type="submit" class="secondary">Clear Recent Outgoing Events</button>
+  </form>
   {% if recent_outgoing_events %}
   <pre>{{ recent_outgoing_events | map(attribute='payload_json') | list | tojson(indent=2) }}</pre>
   {% else %}
@@ -269,6 +303,11 @@
     const runtimeLog = document.getElementById("outgoing-runtime-log");
     const debugPath = document.getElementById("outgoing-debug-path");
     const runtimePath = document.getElementById("outgoing-runtime-path");
+    const languageSelect = document.querySelector('select[name="assistant_language"]');
+    const sttSelect = document.querySelector('select[name="stt_language"]');
+    const voiceSelect = document.getElementById("tts-voice-select");
+    const voiceStatus = document.getElementById("tts-voice-status");
+    let sttTouched = false;
 
     async function refreshDebug() {
       try {
@@ -312,6 +351,79 @@
       refreshHandle = null;
     }
 
+    function syncSttLanguage() {
+      if (sttTouched || !languageSelect || !sttSelect) {
+        return;
+      }
+      const assistantLanguage = languageSelect.value || "en";
+      if ([...sttSelect.options].some((option) => option.value === assistantLanguage)) {
+        sttSelect.value = assistantLanguage;
+      }
+    }
+
+    async function refreshVoices() {
+      if (!languageSelect || !voiceSelect || !voiceStatus) {
+        return;
+      }
+      const language = languageSelect.value || "en";
+      const selectedVoice = voiceSelect.dataset.selectedVoice || voiceSelect.value || "";
+      voiceStatus.textContent = "Loading Cartesia voices...";
+      try {
+        const response = await fetch(
+          `/admin/cartesia/voices?language=${encodeURIComponent(language)}&selected=${encodeURIComponent(selectedVoice)}`,
+          { headers: { "X-Requested-With": "fetch" } }
+        );
+        const payload = await response.json();
+        const voices = Array.isArray(payload.voices) ? payload.voices : [];
+        const previousValue = voiceSelect.value || selectedVoice;
+        voiceSelect.innerHTML = "";
+        if (!voices.length) {
+          const option = document.createElement("option");
+          option.value = previousValue;
+          option.textContent = previousValue || "No Cartesia voices available";
+          if (previousValue) {
+            option.selected = true;
+          }
+          voiceSelect.appendChild(option);
+          voiceStatus.textContent = payload.error || "No voices were returned for this language.";
+          return;
+        }
+        voices.forEach((voice) => {
+          const option = document.createElement("option");
+          option.value = voice.id;
+          option.textContent = `${voice.name}${voice.gender ? " - " + voice.gender : ""}`;
+          if (voice.id === previousValue) {
+            option.selected = true;
+          }
+          voiceSelect.appendChild(option);
+        });
+        if (!voiceSelect.value && voices.length) {
+          voiceSelect.value = voices[0].id;
+        }
+        voiceSelect.dataset.selectedVoice = voiceSelect.value || previousValue;
+        voiceStatus.textContent = "Voices are loaded live from Cartesia and filtered by the selected outgoing language.";
+      } catch (error) {
+        voiceStatus.textContent = "Unable to load Cartesia voices right now.";
+      }
+    }
+
+    if (languageSelect) {
+      languageSelect.addEventListener("change", function () {
+        syncSttLanguage();
+        refreshVoices();
+      });
+    }
+    if (sttSelect) {
+      sttSelect.addEventListener("change", function () {
+        sttTouched = true;
+      });
+    }
+    if (voiceSelect) {
+      voiceSelect.addEventListener("change", () => {
+        voiceSelect.dataset.selectedVoice = voiceSelect.value || "";
+      });
+    }
+
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
         stopRefreshLoop();
@@ -322,6 +434,8 @@
     });
 
     startRefreshLoop();
+    syncSttLanguage();
+    refreshVoices();
   })();
 </script>
 {% endblock %}

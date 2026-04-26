@@ -46,6 +46,8 @@ def _upgrade_outgoing_schema() -> None:
         "llm_model": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN llm_model VARCHAR(128) NOT NULL DEFAULT ''",
         "tts_voice": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN tts_voice VARCHAR(128) NOT NULL DEFAULT ''",
         "tts_speed": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN tts_speed FLOAT NOT NULL DEFAULT 1.0",
+        "min_endpointing_delay": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN min_endpointing_delay FLOAT NOT NULL DEFAULT 0.3",
+        "max_endpointing_delay": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN max_endpointing_delay FLOAT NOT NULL DEFAULT 1.2",
     }
     missing = [statement for name, statement in pending_columns.items() if name not in columns]
     if not missing:

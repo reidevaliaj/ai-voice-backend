@@ -28,6 +28,7 @@ from models import AdminUser, CallEvent, Tenant, TenantPhoneNumber
 from security import decrypt_json, mask_secret, verify_password
 from services.cartesia import get_cartesia_voice_options
 from services.outgoing import (
+    clear_outgoing_events,
     create_outgoing_call,
     ensure_outgoing_profile,
     get_default_outgoing_number,
@@ -385,6 +386,14 @@ async def tenant_outgoing_detail(
         raise HTTPException(status_code=404, detail="Tenant not found")
     active_config = get_active_config(db, tenant.id)
     profile = ensure_outgoing_profile(outgoing_db, tenant, active_config=active_config)
+    selected_language = normalize_assistant_language(profile.assistant_language or getattr(active_config, "assistant_language", "en"))
+    selected_voice = str(profile.tts_voice or getattr(active_config, "tts_voice", "") or "")
+    voice_options: list[dict[str, Any]] = []
+    voice_error = ""
+    try:
+        voice_options = get_cartesia_voice_options(selected_language, selected_voice=selected_voice)
+    except Exception as exc:
+        voice_error = str(exc)
     recent_calls = await _sync_recent_outgoing_calls_with_telnyx(
         outgoing_db,
         list_recent_outgoing_calls(outgoing_db, tenant.id),
@@ -408,6 +417,8 @@ async def tenant_outgoing_detail(
             "default_outgoing_number": get_default_outgoing_number(outgoing_db, tenant.id),
             "language_choices": supported_assistant_languages(),
             "stt_language_choices": supported_stt_languages(),
+            "cartesia_voice_options": voice_options,
+            "cartesia_voice_error": voice_error,
             "flash": _consume_flash(request),
         },
     )
@@ -474,6 +485,8 @@ async def save_outgoing_config(
         "llm_model": str(form.get("llm_model") or "").strip(),
         "tts_voice": str(form.get("tts_voice") or "").strip(),
         "tts_speed": form.get("tts_speed"),
+        "min_endpointing_delay": form.get("min_endpointing_delay"),
+        "max_endpointing_delay": form.get("max_endpointing_delay"),
         "opening_phrase": str(form.get("opening_phrase") or "").strip(),
         "system_prompt": str(form.get("system_prompt") or "").strip(),
         "caller_display_name": str(form.get("caller_display_name") or tenant.display_name).strip(),
@@ -481,6 +494,22 @@ async def save_outgoing_config(
     }
     save_outgoing_profile(outgoing_db, tenant, payload, active_config=get_active_config(db, tenant.id))
     _flash(request, "success", "Outgoing call settings saved")
+    return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+
+@router.post("/admin/tenants/{slug}/outgoing/events/clear")
+async def clear_outgoing_events_action(
+    slug: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    deleted = clear_outgoing_events(outgoing_db, tenant.id)
+    _flash(request, "success", f"Cleared {deleted} outgoing event(s)")
     return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
 
 

@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from twilio.twiml.voice_response import VoiceResponse
 
 from app_config import (
     FASTAPI_INTERNAL_API_KEY,
@@ -22,11 +24,15 @@ from app_config import (
     TELNYX_OUTGOING_RECORDING_FORMAT,
     TELNYX_OUTGOING_RECORDING_MAX_LENGTH,
     TELNYX_OUTGOING_WEBHOOK_PATH,
+    TWILIO_OUTGOING_SIP_STATUS_PATH,
+    TWILIO_OUTGOING_STATUS_PATH,
+    TWILIO_OUTGOING_TWIML_PATH,
 )
 from db import get_db
 from outgoing_db import get_outgoing_db
 from services.outgoing import (
     apply_telnyx_event_to_call,
+    apply_twilio_event_to_call,
     build_outgoing_runtime,
     get_outgoing_call,
     log_outgoing_event,
@@ -46,6 +52,7 @@ from services.telnyx_voice import (
     transfer_call,
 )
 from services.tenants import get_tenant_by_id, get_tenant_by_slug, normalize_phone_number
+from services.twilio_voice import hangup_call as twilio_hangup_call
 from tools.email_resend import send_email_resend
 from tools.storage import append_event
 from tools.transcript_ai import analyze_outgoing_transcript
@@ -53,6 +60,11 @@ from tools.transcript_ai import analyze_outgoing_transcript
 logger = logging.getLogger("outgoing")
 
 router = APIRouter()
+TWILIO_OUTGOING_TWIML_ROUTE = TWILIO_OUTGOING_TWIML_PATH if TWILIO_OUTGOING_TWIML_PATH.startswith("/") else f"/{TWILIO_OUTGOING_TWIML_PATH}"
+TWILIO_OUTGOING_STATUS_ROUTE = TWILIO_OUTGOING_STATUS_PATH if TWILIO_OUTGOING_STATUS_PATH.startswith("/") else f"/{TWILIO_OUTGOING_STATUS_PATH}"
+TWILIO_OUTGOING_SIP_STATUS_ROUTE = (
+    TWILIO_OUTGOING_SIP_STATUS_PATH if TWILIO_OUTGOING_SIP_STATUS_PATH.startswith("/") else f"/{TWILIO_OUTGOING_SIP_STATUS_PATH}"
+)
 
 
 class OutgoingSessionConfigRequest(BaseModel):
@@ -92,6 +104,14 @@ def _require_internal_api_key(x_internal_api_key: str | None = Header(default=No
 
 def _public_url(path: str) -> str:
     return PUBLIC_BASE_URL.rstrip("/") + path
+
+
+def _sip_uri_with_headers(base_uri: str, headers: dict[str, str]) -> str:
+    prefix = "&" if "?" in base_uri else "?"
+    parts = [f"{quote_plus(key)}={quote_plus(value)}" for key, value in headers.items() if value]
+    if not parts:
+        return base_uri
+    return base_uri + prefix + "&".join(parts)
 
 
 def _telnyx_outgoing_webhook_url() -> str:
@@ -246,6 +266,25 @@ def _is_machine_detection_result(result: str) -> bool:
     return result in {"machine", "fax_detected", "silence"}
 
 
+async def _request_form_dict(request: Request) -> dict[str, Any]:
+    if request.method != "POST":
+        return {}
+    try:
+        form = await request.form()
+    except Exception:
+        return {}
+    return dict(form)
+
+
+def _twilio_event_name(call_status: str) -> str:
+    normalized = str(call_status or "").strip().lower()
+    if normalized == "in-progress":
+        return "answered"
+    if normalized == "queued":
+        return "initiated"
+    return normalized or "status_callback"
+
+
 async def _ensure_primary_leg_recording(call: Any, tenant: Any, outgoing_db: Session) -> None:
     debug_state = _current_debug_state(call)
     if debug_state.get("recording_start_requested"):
@@ -370,7 +409,9 @@ async def outgoing_end_call(
     call = get_outgoing_call(
         outgoing_db,
         outgoing_call_id=payload.outgoing_call_id,
+        provider_call_sid=payload.call_sid,
         telnyx_call_control_id=payload.call_sid,
+        twilio_call_sid=payload.call_sid,
         tenant_id=tenant.id if tenant else "",
     )
     if call is None:
@@ -387,7 +428,8 @@ async def outgoing_end_call(
         },
     )
     try:
-        if call.telnyx_call_control_id:
+        provider = str(call.provider or "telnyx").strip().lower() or "telnyx"
+        if provider == "telnyx" and call.telnyx_call_control_id:
             await hangup_call(
                 call.telnyx_call_control_id,
                 {
@@ -404,6 +446,8 @@ async def outgoing_end_call(
                     ),
                 },
             )
+        elif provider == "twilio" and call.twilio_call_sid:
+            await twilio_hangup_call(call.twilio_call_sid)
     except Exception as exc:
         logger.warning("[TELNYX_OUTGOING] hangup request after assistant goodbye failed call=%s error=%s", call.id, exc)
         update_outgoing_call_extra(
@@ -485,6 +529,7 @@ async def outgoing_agent_session_config(
         db,
         outgoing_db,
         tenant=tenant,
+        call_sid=payload.call_sid,
         call_control_id=payload.call_sid,
         outgoing_call_id=payload.outgoing_call_id,
         room_name=payload.room_name,
@@ -507,7 +552,9 @@ async def outgoing_transcript_event(
     call = get_outgoing_call(
         outgoing_db,
         outgoing_call_id=payload.outgoing_call_id,
+        provider_call_sid=payload.call_sid,
         telnyx_call_control_id=payload.call_sid,
+        twilio_call_sid=payload.call_sid,
         tenant_id=tenant.id if tenant else "",
     )
     if call is None:
@@ -536,6 +583,7 @@ async def outgoing_transcript_event(
         db,
         outgoing_db,
         tenant=tenant,
+        call_sid=call.provider_call_sid,
         call_control_id=call.telnyx_call_control_id,
         outgoing_call_id=call.id,
         room_name=payload.room_name,
@@ -605,6 +653,196 @@ async def outgoing_transcript_event(
             room_name=payload.room_name,
         )
     return {"ok": True, "call_id": call.id}
+
+
+@router.api_route(TWILIO_OUTGOING_TWIML_ROUTE, methods=["GET", "POST"])
+async def twilio_outgoing_twiml(
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    payload = await _request_form_dict(request)
+    outgoing_call_id = str(request.query_params.get("outgoing_call_id") or payload.get("outgoing_call_id") or "").strip()
+    call_sid = str(payload.get("CallSid") or "").strip()
+    call = get_outgoing_call(
+        outgoing_db,
+        outgoing_call_id=outgoing_call_id,
+        provider_call_sid=call_sid,
+        twilio_call_sid=call_sid,
+    )
+    if call is None:
+        vr = VoiceResponse()
+        vr.say("We could not complete this outgoing call.")
+        vr.hangup()
+        return Response(content=str(vr), media_type="application/xml")
+
+    tenant = get_tenant_by_id(db, call.tenant_id)
+    if tenant is None:
+        vr = VoiceResponse()
+        vr.say("We could not complete this outgoing call.")
+        vr.hangup()
+        return Response(content=str(vr), media_type="application/xml")
+
+    called_number = normalize_phone_number(str(payload.get("To") or call.target_number or ""))
+    caller_number = normalize_phone_number(str(payload.get("From") or call.from_number or ""))
+    config_version = str(call.tenant_config_version or 1)
+    call_payload = {
+        **payload,
+        "provider": "twilio",
+        "provider_call_sid": call_sid,
+        "outgoing_call_id": call.id,
+        "called_number": called_number,
+        "caller_number": caller_number,
+    }
+    apply_twilio_event_to_call(outgoing_db, call, "answered", call_payload)
+    update_outgoing_call_extra(
+        outgoing_db,
+        call,
+        {
+            "twilio_twiml_requested_at": datetime.now(timezone.utc).isoformat(),
+            "twilio_called_number": called_number,
+            "twilio_caller_number": caller_number,
+        },
+    )
+    log_outgoing_event(
+        outgoing_db,
+        tenant_id=call.tenant_id,
+        tenant_slug=call.tenant_slug,
+        event_type="twilio_twiml_requested",
+        payload=call_payload,
+        call=call,
+    )
+
+    sip_uri = _sip_uri_with_headers(
+        LIVEKIT_OUTGOING_SIP_URI,
+        {
+            "x-tenant-id": tenant.id,
+            "x-tenant-slug": tenant.slug,
+            "x-config-version": config_version,
+            "x-called-number": call.target_number or called_number,
+            "x-caller-number": call.from_number or caller_number,
+            "x-parent-call-sid": call_sid,
+            "x-outgoing-call-id": call.id,
+            "x-call-direction": "outgoing",
+            "x-call-provider": "twilio",
+        },
+    )
+    sip_status_callback = _public_url(TWILIO_OUTGOING_SIP_STATUS_ROUTE) + f"?outgoing_call_id={call.id}"
+
+    vr = VoiceResponse()
+    dial = vr.dial(answer_on_bridge=True, timeout=20)
+    dial.sip(
+        sip_uri,
+        username=LIVEKIT_OUTGOING_SIP_USERNAME,
+        password=LIVEKIT_OUTGOING_SIP_PASSWORD,
+        status_callback=sip_status_callback,
+        status_callback_method="POST",
+        status_callback_event="initiated ringing answered completed",
+    )
+    return Response(content=str(vr), media_type="application/xml")
+
+
+@router.api_route(TWILIO_OUTGOING_STATUS_ROUTE, methods=["GET", "POST"])
+async def twilio_outgoing_status(
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    payload = {**dict(request.query_params), **(await _request_form_dict(request))}
+    outgoing_call_id = str(payload.get("outgoing_call_id") or "").strip()
+    call_sid = str(payload.get("CallSid") or "").strip()
+    call = get_outgoing_call(
+        outgoing_db,
+        outgoing_call_id=outgoing_call_id,
+        provider_call_sid=call_sid,
+        twilio_call_sid=call_sid,
+    )
+    if call is None:
+        return Response("OK")
+
+    tenant = get_tenant_by_id(db, call.tenant_id)
+    event_type = _twilio_event_name(str(payload.get("CallStatus") or ""))
+    event_payload = {
+        **payload,
+        "provider": "twilio",
+        "provider_call_sid": call_sid,
+        "outgoing_call_id": call.id,
+    }
+    apply_twilio_event_to_call(outgoing_db, call, event_type, event_payload)
+    update_outgoing_call_extra(
+        outgoing_db,
+        call,
+        {
+            "last_twilio_status": str(payload.get("CallStatus") or ""),
+            "last_twilio_status_at": datetime.now(timezone.utc).isoformat(),
+            "twilio_direction": str(payload.get("Direction") or ""),
+            "twilio_call_duration": str(payload.get("CallDuration") or ""),
+            "twilio_sip_response_code": str(payload.get("SipResponseCode") or ""),
+        },
+    )
+    if tenant is not None:
+        log_outgoing_event(
+            outgoing_db,
+            tenant_id=call.tenant_id,
+            tenant_slug=call.tenant_slug,
+            event_type=f"twilio_{event_type}",
+            payload=event_payload,
+            call=call,
+            room_name=call.livekit_room_name,
+        )
+    return Response("OK")
+
+
+@router.api_route(TWILIO_OUTGOING_SIP_STATUS_ROUTE, methods=["GET", "POST"])
+async def twilio_outgoing_sip_status(
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    payload = {**dict(request.query_params), **(await _request_form_dict(request))}
+    outgoing_call_id = str(payload.get("outgoing_call_id") or "").strip()
+    parent_call_sid = str(payload.get("ParentCallSid") or "").strip()
+    child_call_sid = str(payload.get("CallSid") or "").strip()
+    call = get_outgoing_call(
+        outgoing_db,
+        outgoing_call_id=outgoing_call_id,
+        provider_call_sid=parent_call_sid or child_call_sid,
+        twilio_call_sid=parent_call_sid or child_call_sid,
+    )
+    if call is None:
+        return Response("OK")
+
+    tenant = get_tenant_by_id(db, call.tenant_id)
+    event_type = _twilio_event_name(str(payload.get("CallStatus") or ""))
+    event_payload = {
+        **payload,
+        "provider": "twilio",
+        "provider_call_sid": parent_call_sid or call.provider_call_sid,
+        "twilio_child_call_sid": child_call_sid,
+        "outgoing_call_id": call.id,
+    }
+    apply_twilio_event_to_call(outgoing_db, call, event_type, event_payload, is_sip_leg=True)
+    update_outgoing_call_extra(
+        outgoing_db,
+        call,
+        {
+            "twilio_sip_leg_status": str(payload.get("CallStatus") or ""),
+            "twilio_sip_leg_status_at": datetime.now(timezone.utc).isoformat(),
+            "twilio_sip_child_call_sid": child_call_sid,
+            "twilio_sip_parent_call_sid": parent_call_sid,
+        },
+    )
+    if tenant is not None:
+        log_outgoing_event(
+            outgoing_db,
+            tenant_id=call.tenant_id,
+            tenant_slug=call.tenant_slug,
+            event_type=f"twilio_sip_{event_type}",
+            payload=event_payload,
+            call=call,
+            room_name=call.livekit_room_name,
+        )
+    return Response("OK")
 
 
 @router.post(TELNYX_OUTGOING_WEBHOOK_PATH)

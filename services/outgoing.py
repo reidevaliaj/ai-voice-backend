@@ -18,6 +18,8 @@ from services.tenants import (
     normalize_tts_speed,
 )
 
+SUPPORTED_OUTGOING_PROVIDERS = {"telnyx", "twilio"}
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -36,6 +38,11 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _normalize_outgoing_provider(value: Any) -> str:
+    candidate = str(value or "telnyx").strip().lower()
+    return candidate if candidate in SUPPORTED_OUTGOING_PROVIDERS else "telnyx"
 
 
 def default_outgoing_opening_phrase(display_name: str, assistant_language: str = "en") -> str:
@@ -82,6 +89,7 @@ def ensure_outgoing_profile(session: Session, tenant: Any, active_config: Any | 
             tenant_slug=tenant.slug,
             display_name=tenant.display_name,
             status="inactive",
+            provider="telnyx",
             telnyx_connection_id="",
             assistant_language=assistant_language,
             stt_language=stt_language,
@@ -100,6 +108,7 @@ def ensure_outgoing_profile(session: Session, tenant: Any, active_config: Any | 
     else:
         profile.tenant_slug = tenant.slug
         profile.display_name = tenant.display_name
+        profile.provider = _normalize_outgoing_provider(getattr(profile, "provider", "telnyx"))
         if not profile.assistant_language:
             profile.assistant_language = assistant_language
         if not profile.stt_language:
@@ -137,12 +146,12 @@ def list_outgoing_numbers(session: Session, tenant_id: str) -> list[OutgoingCall
     stmt = (
         select(OutgoingCallerNumber)
         .where(OutgoingCallerNumber.tenant_id == tenant_id)
-        .order_by(OutgoingCallerNumber.is_default.desc(), OutgoingCallerNumber.created_at.asc())
+        .order_by(OutgoingCallerNumber.provider.asc(), OutgoingCallerNumber.is_default.desc(), OutgoingCallerNumber.created_at.asc())
     )
     return list(session.scalars(stmt))
 
 
-def get_default_outgoing_number(session: Session, tenant_id: str) -> OutgoingCallerNumber | None:
+def get_default_outgoing_number(session: Session, tenant_id: str, provider: str = "") -> OutgoingCallerNumber | None:
     stmt = (
         select(OutgoingCallerNumber)
         .where(
@@ -151,6 +160,9 @@ def get_default_outgoing_number(session: Session, tenant_id: str) -> OutgoingCal
         )
         .order_by(OutgoingCallerNumber.is_default.desc(), OutgoingCallerNumber.created_at.asc())
     )
+    normalized_provider = _normalize_outgoing_provider(provider) if provider else ""
+    if normalized_provider:
+        stmt = stmt.where(OutgoingCallerNumber.provider == normalized_provider)
     return session.scalars(stmt).first()
 
 
@@ -158,11 +170,13 @@ def upsert_outgoing_number(
     session: Session,
     tenant: Any,
     *,
+    provider: str = "telnyx",
     phone_number: str,
     label: str = "primary",
     is_default: bool = False,
 ) -> OutgoingCallerNumber:
     normalized = normalize_phone_number(phone_number)
+    normalized_provider = _normalize_outgoing_provider(provider)
     if not normalized:
         raise ValueError("Phone number is required")
 
@@ -177,6 +191,7 @@ def upsert_outgoing_number(
             profile_id=profile.id,
             tenant_id=tenant.id,
             tenant_slug=tenant.slug,
+            provider=normalized_provider,
             phone_number=normalized,
             label=label or "primary",
             status="active",
@@ -186,6 +201,7 @@ def upsert_outgoing_number(
     else:
         record.profile_id = profile.id
         record.tenant_slug = tenant.slug
+        record.provider = normalized_provider
         record.label = label or record.label or "primary"
         record.status = "active"
         record.is_default = is_default or record.is_default
@@ -193,9 +209,9 @@ def upsert_outgoing_number(
     if record.is_default:
         others = list_outgoing_numbers(session, tenant.id)
         for other in others:
-            if other.id != record.id:
+            if other.id != record.id and _normalize_outgoing_provider(other.provider) == normalized_provider:
                 other.is_default = False
-    elif get_default_outgoing_number(session, tenant.id) is None:
+    elif get_default_outgoing_number(session, tenant.id, normalized_provider) is None:
         record.is_default = True
 
     session.flush()
@@ -210,6 +226,7 @@ def save_outgoing_profile(
     active_config: Any | None = None,
 ) -> OutgoingTenantProfile:
     profile = ensure_outgoing_profile(session, tenant, active_config=active_config)
+    provider = _normalize_outgoing_provider(payload.get("provider") or profile.provider or "telnyx")
     assistant_language = normalize_assistant_language(str(payload.get("assistant_language") or profile.assistant_language or "en"))
     min_endpointing_delay, max_endpointing_delay = normalize_endpointing_window(
         payload.get("min_endpointing_delay") if payload.get("min_endpointing_delay") not in (None, "") else profile.min_endpointing_delay,
@@ -223,6 +240,7 @@ def save_outgoing_profile(
     profile.min_endpointing_delay = min_endpointing_delay
     profile.max_endpointing_delay = max_endpointing_delay
     profile.status = str(payload.get("status") or profile.status or "inactive").strip().lower() or "inactive"
+    profile.provider = provider
     profile.telnyx_connection_id = str(payload.get("telnyx_connection_id") or "").strip()
     profile.opening_phrase = str(payload.get("opening_phrase") or "").strip() or default_outgoing_opening_phrase(tenant.display_name, assistant_language)
     profile.system_prompt = str(payload.get("system_prompt") or "").strip() or default_outgoing_prompt(tenant.display_name, assistant_language)
@@ -237,6 +255,7 @@ def outgoing_profile_form_payload(profile: OutgoingTenantProfile | None, tenant:
         assistant_language = "en"
         return {
             "status": "inactive",
+            "provider": "telnyx",
             "telnyx_connection_id": "",
             "assistant_language": assistant_language,
             "stt_language": normalize_stt_language("", assistant_language),
@@ -252,6 +271,7 @@ def outgoing_profile_form_payload(profile: OutgoingTenantProfile | None, tenant:
         }
     return {
         "status": profile.status,
+        "provider": _normalize_outgoing_provider(profile.provider),
         "telnyx_connection_id": profile.telnyx_connection_id,
         "assistant_language": profile.assistant_language,
         "stt_language": profile.stt_language,
@@ -278,11 +298,13 @@ def create_outgoing_call(
     notes: str = "",
     tenant_config_version: int = 1,
 ) -> OutgoingCall:
+    provider = _normalize_outgoing_provider(profile.provider)
     call = OutgoingCall(
         profile_id=profile.id,
         tenant_id=tenant.id,
         tenant_slug=tenant.slug,
         tenant_display_name=tenant.display_name,
+        provider=provider,
         target_number=normalize_phone_number(target_number),
         target_name=str(target_name or "").strip(),
         from_number=normalize_phone_number(from_number),
@@ -290,7 +312,7 @@ def create_outgoing_call(
         notes=str(notes or "").strip(),
         status="queued",
         tenant_config_version=int(tenant_config_version or 1),
-        telnyx_connection_id=profile.telnyx_connection_id,
+        telnyx_connection_id=profile.telnyx_connection_id if provider == "telnyx" else "",
         extra_json={},
     )
     session.add(call)
@@ -302,15 +324,27 @@ def get_outgoing_call(
     session: Session,
     *,
     outgoing_call_id: str = "",
+    provider_call_sid: str = "",
     telnyx_call_control_id: str = "",
+    twilio_call_sid: str = "",
     tenant_id: str = "",
 ) -> OutgoingCall | None:
     if outgoing_call_id:
         record = session.get(OutgoingCall, outgoing_call_id)
         if record is not None:
             return record
+    if provider_call_sid:
+        stmt = select(OutgoingCall).where(OutgoingCall.provider_call_sid == provider_call_sid)
+        record = session.scalar(stmt)
+        if record is not None:
+            return record
     if telnyx_call_control_id:
         stmt = select(OutgoingCall).where(OutgoingCall.telnyx_call_control_id == telnyx_call_control_id)
+        record = session.scalar(stmt)
+        if record is not None:
+            return record
+    if twilio_call_sid:
+        stmt = select(OutgoingCall).where(OutgoingCall.twilio_call_sid == twilio_call_sid)
         record = session.scalar(stmt)
         if record is not None:
             return record
@@ -358,11 +392,21 @@ def log_outgoing_event(
     call: OutgoingCall | None = None,
     room_name: str = "",
 ) -> OutgoingCallEvent:
+    provider = _normalize_outgoing_provider((call.provider if call else "") or payload.get("provider") or "telnyx")
+    provider_call_sid = str(
+        payload.get("provider_call_sid")
+        or payload.get("call_control_id")
+        or payload.get("CallSid")
+        or (call.provider_call_sid if call else "")
+        or ""
+    )
     event = OutgoingCallEvent(
         outgoing_call_id=call.id if call else None,
         tenant_id=tenant_id,
         tenant_slug=tenant_slug,
+        provider=provider,
         event_type=event_type,
+        provider_call_sid=provider_call_sid,
         telnyx_call_control_id=str(payload.get("call_control_id") or payload.get("CallSid") or ""),
         room_name=room_name or str(payload.get("room_name") or ""),
         payload_json=payload,
@@ -373,8 +417,10 @@ def log_outgoing_event(
 
 
 def apply_telnyx_event_to_call(session: Session, call: OutgoingCall, event_type: str, payload: dict[str, Any]) -> OutgoingCall:
+    call.provider = "telnyx"
     call.telnyx_event_type = event_type
     call.telnyx_call_control_id = str(payload.get("call_control_id") or call.telnyx_call_control_id or "")
+    call.provider_call_sid = call.telnyx_call_control_id or call.provider_call_sid or ""
     call.telnyx_call_leg_id = str(payload.get("call_leg_id") or call.telnyx_call_leg_id or "")
     call.telnyx_call_session_id = str(payload.get("call_session_id") or call.telnyx_call_session_id or "")
     call.updated_at = _utcnow()
@@ -398,6 +444,70 @@ def apply_telnyx_event_to_call(session: Session, call: OutgoingCall, event_type:
         call.telnyx_hangup_cause = str(payload.get("hangup_cause") or "")
         if call.status not in {"completed", "failed"}:
             call.status = "completed" if call.answered_at else "failed"
+    session.flush()
+    return call
+
+
+def apply_twilio_event_to_call(
+    session: Session,
+    call: OutgoingCall,
+    event_type: str,
+    payload: dict[str, Any],
+    *,
+    is_sip_leg: bool = False,
+) -> OutgoingCall:
+    call.provider = "twilio"
+    call.twilio_event_type = event_type
+    primary_call_sid = str(
+        payload.get("provider_call_sid")
+        or payload.get("ParentCallSid")
+        or (payload.get("CallSid") if not is_sip_leg else "")
+        or call.twilio_call_sid
+        or ""
+    )
+    if primary_call_sid:
+        call.twilio_call_sid = primary_call_sid
+        call.provider_call_sid = primary_call_sid
+    call.updated_at = _utcnow()
+
+    status = str(payload.get("CallStatus") or "").strip().lower()
+    if is_sip_leg:
+        if event_type in {"answered", "in-progress"} or status == "in-progress":
+            if not call.bridged_at:
+                call.bridged_at = _utcnow()
+            if call.status not in {"completed", "failed"}:
+                call.status = "bridged"
+        elif event_type == "completed":
+            if not call.bridged_at and status == "completed":
+                call.bridged_at = _utcnow()
+        session.flush()
+        return call
+
+    if event_type in {"initiated", "queued"}:
+        if not call.started_at:
+            call.started_at = _utcnow()
+        if call.status == "queued":
+            call.status = "initiated"
+    elif event_type == "ringing":
+        if not call.started_at:
+            call.started_at = _utcnow()
+        if call.status == "queued":
+            call.status = "dialing"
+    elif event_type in {"answered", "in-progress"} or status == "in-progress":
+        if not call.answered_at:
+            call.answered_at = _utcnow()
+        if call.status not in {"bridged", "completed", "failed"}:
+            call.status = "answered"
+    elif event_type == "completed":
+        if not call.ended_at:
+            call.ended_at = _utcnow()
+        call.twilio_hangup_cause = status
+        if status in {"busy", "failed", "no-answer", "canceled"}:
+            call.status = "failed"
+            if not call.last_error:
+                call.last_error = f"Twilio call ended with status '{status}'."
+        elif call.status not in {"completed", "failed"}:
+            call.status = "completed" if call.answered_at or call.bridged_at else "failed"
     session.flush()
     return call
 
@@ -433,6 +543,9 @@ def update_outgoing_call_extra(session: Session, call: OutgoingCall, updates: di
 
 
 def sync_outgoing_call_from_provider(session: Session, call: OutgoingCall, provider_payload: dict[str, Any]) -> OutgoingCall:
+    if _normalize_outgoing_provider(call.provider) != "telnyx":
+        return call
+
     data = provider_payload.get("data") if isinstance(provider_payload, dict) else {}
     if not isinstance(data, dict):
         return call
@@ -455,6 +568,8 @@ def sync_outgoing_call_from_provider(session: Session, call: OutgoingCall, provi
         call.telnyx_call_leg_id = str(data.get("call_leg_id") or "")
     if data.get("call_session_id") and not call.telnyx_call_session_id:
         call.telnyx_call_session_id = str(data.get("call_session_id") or "")
+    if data.get("call_control_id") and not call.provider_call_sid:
+        call.provider_call_sid = str(data.get("call_control_id") or "")
 
     start_time = _parse_iso_datetime(str(data.get("start_time") or ""))
     end_time = _parse_iso_datetime(str(data.get("end_time") or ""))
@@ -506,6 +621,7 @@ def build_outgoing_runtime(
     outgoing_session: Session,
     *,
     tenant: Any,
+    call_sid: str = "",
     call_control_id: str = "",
     outgoing_call_id: str = "",
     room_name: str = "",
@@ -514,7 +630,9 @@ def build_outgoing_runtime(
     call = get_outgoing_call(
         outgoing_session,
         outgoing_call_id=outgoing_call_id,
+        provider_call_sid=call_sid,
         telnyx_call_control_id=call_control_id,
+        twilio_call_sid=call_sid,
         tenant_id=tenant.id,
     )
     config_version = call.tenant_config_version if call is not None else None
@@ -543,6 +661,7 @@ def build_outgoing_runtime(
         "outgoing": {
             "profile_id": profile.id,
             "status": profile.status,
+            "provider": _normalize_outgoing_provider(profile.provider),
             "telnyx_connection_id": profile.telnyx_connection_id,
             "assistant_language": profile.assistant_language,
             "stt_language": profile.stt_language,
@@ -559,11 +678,14 @@ def build_outgoing_runtime(
         "call": {
             "id": call.id if call else "",
             "status": call.status if call else "unknown",
+            "provider": _normalize_outgoing_provider(call.provider if call else profile.provider),
+            "provider_call_id": call.provider_call_sid if call else call_sid or call_control_id,
             "target_number": call.target_number if call else "",
             "target_name": call.target_name if call else "",
             "from_number": call.from_number if call else "",
             "notes": call.notes if call else "",
             "livekit_room_name": call.livekit_room_name if call else room_name,
             "telnyx_call_control_id": call.telnyx_call_control_id if call else call_control_id,
+            "twilio_call_sid": call.twilio_call_sid if call else call_sid,
         },
     }

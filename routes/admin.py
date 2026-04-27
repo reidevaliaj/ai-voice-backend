@@ -21,6 +21,8 @@ from app_config import (
     TELNYX_API_KEY,
     TELNYX_OUTGOING_HANDOFF_MODE,
     TELNYX_OUTGOING_AMD_MODE,
+    TWILIO_ACCOUNT_SID,
+    TWILIO_AUTH_TOKEN,
 )
 from db import get_db
 from outgoing_db import get_outgoing_db
@@ -40,7 +42,7 @@ from services.outgoing import (
     sync_outgoing_call_from_provider,
     upsert_outgoing_number,
 )
-from services.telnyx_voice import dial_call, encode_client_state, get_call_details, telnyx_command_id
+from services.telnyx_voice import dial_call as telnyx_dial_call, encode_client_state, get_call_details, telnyx_command_id
 from services.tenants import (
     build_runtime_context,
     config_form_payload,
@@ -61,6 +63,7 @@ from services.tenants import (
     upsert_integration,
     upsert_phone_number,
 )
+from services.twilio_voice import dial_call as twilio_dial_call
 from tools.email_resend import send_email_resend
 from tools.google_calendar import CalendarContext, validate_calendar_context
 from tools.zoom_meetings import ZoomContext, validate_zoom_context
@@ -77,6 +80,10 @@ OUTGOING_ACTIVE_STATUSES = {
     "human_detected",
     "livekit_transfer_requested",
 }
+OUTGOING_PROVIDER_CHOICES = (
+    {"value": "telnyx", "label": "Telnyx"},
+    {"value": "twilio", "label": "Twilio"},
+)
 
 
 def _read_log_tail(path_value: str, max_chars: int = DEBUG_LOG_MAX_CHARS) -> dict[str, Any]:
@@ -140,7 +147,11 @@ def _integration_summary(session: Session, tenant_id: str) -> dict[str, dict[str
 async def _sync_recent_outgoing_calls_with_telnyx(outgoing_db: Session, calls: list[Any]) -> list[Any]:
     synced: list[Any] = []
     for call in calls:
-        if call.status not in OUTGOING_ACTIVE_STATUSES or not call.telnyx_call_control_id:
+        if (
+            getattr(call, "provider", "telnyx") != "telnyx"
+            or call.status not in OUTGOING_ACTIVE_STATUSES
+            or not call.telnyx_call_control_id
+        ):
             synced.append(call)
             continue
         try:
@@ -386,6 +397,9 @@ async def tenant_outgoing_detail(
         raise HTTPException(status_code=404, detail="Tenant not found")
     active_config = get_active_config(db, tenant.id)
     profile = ensure_outgoing_profile(outgoing_db, tenant, active_config=active_config)
+    active_provider = str(profile.provider or "telnyx").strip().lower() or "telnyx"
+    outgoing_numbers = list_outgoing_numbers(outgoing_db, tenant.id)
+    provider_numbers = [item for item in outgoing_numbers if str(item.provider or "telnyx").strip().lower() == active_provider]
     selected_language = normalize_assistant_language(profile.assistant_language or getattr(active_config, "assistant_language", "en"))
     selected_voice = str(profile.tts_voice or getattr(active_config, "tts_voice", "") or "")
     voice_options: list[dict[str, Any]] = []
@@ -407,14 +421,17 @@ async def tenant_outgoing_detail(
             "config": active_config,
             "runtime": build_runtime_context(db, tenant) if active_config else None,
             "outgoing_profile_form": outgoing_profile_form_payload(profile, tenant),
-            "outgoing_numbers": list_outgoing_numbers(outgoing_db, tenant.id),
+            "outgoing_numbers": outgoing_numbers,
+            "active_provider_numbers": provider_numbers,
             "recent_outgoing_calls": recent_calls,
             "recent_outgoing_events": list_recent_outgoing_events(outgoing_db, tenant.id),
             "outgoing_agent_debug_log": _read_log_tail(OUTGOING_AGENT_DEBUG_LOG_PATH),
             "outgoing_agent_runtime_log": _read_log_tail(OUTGOING_AGENT_LOG_PATH),
             "telnyx_key_configured": bool(TELNYX_API_KEY),
+            "twilio_key_configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN),
             "outgoing_handoff_mode": (TELNYX_OUTGOING_HANDOFF_MODE or "direct").strip().lower(),
-            "default_outgoing_number": get_default_outgoing_number(outgoing_db, tenant.id),
+            "default_outgoing_number": get_default_outgoing_number(outgoing_db, tenant.id, active_provider),
+            "outgoing_provider_choices": OUTGOING_PROVIDER_CHOICES,
             "language_choices": supported_assistant_languages(),
             "stt_language_choices": supported_stt_languages(),
             "cartesia_voice_options": voice_options,
@@ -448,13 +465,16 @@ async def outgoing_debug_log(
             "recent_outgoing_calls": [
                 {
                     "id": call.id,
+                    "provider": getattr(call, "provider", "telnyx"),
                     "status": call.status,
                     "target_number": call.target_number,
                     "target_name": call.target_name,
                     "from_number": call.from_number,
                     "created_at": call.created_at.isoformat() if call.created_at else "",
                     "updated_at": call.updated_at.isoformat() if call.updated_at else "",
+                    "provider_call_sid": getattr(call, "provider_call_sid", ""),
                     "telnyx_call_control_id": call.telnyx_call_control_id,
+                    "twilio_call_sid": getattr(call, "twilio_call_sid", ""),
                     "livekit_room_name": call.livekit_room_name,
                     "extra_json": call.extra_json or {},
                     "last_error": call.last_error,
@@ -479,6 +499,7 @@ async def save_outgoing_config(
     form = await request.form()
     payload = {
         "status": str(form.get("status") or "inactive").strip(),
+        "provider": str(form.get("provider") or "telnyx").strip(),
         "telnyx_connection_id": str(form.get("telnyx_connection_id") or "").strip(),
         "assistant_language": str(form.get("assistant_language") or "").strip(),
         "stt_language": str(form.get("stt_language") or "").strip(),
@@ -525,6 +546,7 @@ async def save_outgoing_number_action(
     if tenant is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
     form = await request.form()
+    provider = str(form.get("provider") or "telnyx").strip()
     phone_number = normalize_phone_number(str(form.get("phone_number") or ""))
     label = str(form.get("label") or "primary").strip() or "primary"
     is_default = form.get("is_default") == "on"
@@ -534,11 +556,12 @@ async def save_outgoing_number_action(
     upsert_outgoing_number(
         outgoing_db,
         tenant,
+        provider=provider,
         phone_number=phone_number,
         label=label,
         is_default=is_default,
     )
-    _flash(request, "success", f"Outgoing caller ID {phone_number} saved")
+    _flash(request, "success", f"Outgoing caller ID {phone_number} saved for {provider}")
     return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
 
 
@@ -560,12 +583,14 @@ async def launch_outgoing_call(
     target_name = str(form.get("target_name") or "").strip()
     notes = str(form.get("notes") or "").strip()
     selected_from_number = normalize_phone_number(str(form.get("from_number") or ""))
-    default_number = get_default_outgoing_number(outgoing_db, tenant.id)
+    provider = str(profile.provider or "telnyx").strip().lower() or "telnyx"
+    provider_numbers = {
+        item.phone_number
+        for item in list_outgoing_numbers(outgoing_db, tenant.id)
+        if str(item.provider or "telnyx").strip().lower() == provider and item.status == "active"
+    }
+    default_number = get_default_outgoing_number(outgoing_db, tenant.id, provider)
     from_number = selected_from_number or (default_number.phone_number if default_number else "")
-
-    if not TELNYX_API_KEY:
-        _flash(request, "error", "TELNYX_API_KEY is missing on the backend server")
-        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
     if not (LIVEKIT_OUTGOING_SIP_URI and LIVEKIT_OUTGOING_SIP_USERNAME and LIVEKIT_OUTGOING_SIP_PASSWORD):
         _flash(request, "error", "The outgoing LiveKit SIP target is not configured on the backend server yet")
         return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
@@ -575,11 +600,20 @@ async def launch_outgoing_call(
     if not from_number:
         _flash(request, "error", "Save at least one outgoing caller ID for this tenant first")
         return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
-    if not profile.telnyx_connection_id:
-        _flash(request, "error", "Save the tenant's Telnyx Voice API application ID first")
+    if provider_numbers and from_number not in provider_numbers:
+        _flash(request, "error", f"Choose a caller ID saved for the {provider} provider")
         return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
     if profile.status != "active":
         _flash(request, "error", "Set the tenant's outgoing status to active before launching calls")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+    if provider == "telnyx" and not TELNYX_API_KEY:
+        _flash(request, "error", "TELNYX_API_KEY is missing on the backend server")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+    if provider == "telnyx" and not profile.telnyx_connection_id:
+        _flash(request, "error", "Save the tenant's Telnyx Voice API application ID first")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+    if provider == "twilio" and not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN):
+        _flash(request, "error", "TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is missing on the backend server")
         return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
 
     call = create_outgoing_call(
@@ -594,44 +628,60 @@ async def launch_outgoing_call(
     )
     call.extra_json = {
         **(call.extra_json or {}),
+        "provider": provider,
         "handoff_mode": (TELNYX_OUTGOING_HANDOFF_MODE or "direct").strip().lower(),
         "amd_mode": TELNYX_OUTGOING_AMD_MODE,
         "launch_notes": notes,
     }
     outgoing_db.flush()
-    client_state = encode_client_state(
-        {
-            "provider": "telnyx",
-            "mode": "outgoing",
-            "tenant_id": tenant.id,
-            "tenant_slug": tenant.slug,
-            "outgoing_call_id": call.id,
-            "target_number": target_number,
-            "from_number": from_number,
-        }
-    )
 
     try:
-        dial_payload = {
-            "connection_id": profile.telnyx_connection_id,
-            "to": target_number,
-            "from": from_number,
-            "from_display_name": profile.caller_display_name or tenant.display_name,
-            "webhook_url": f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/telnyx/webhook",
-            "webhook_url_method": "POST",
-            "client_state": client_state,
-            "command_id": telnyx_command_id("outgoing-dial", call.id),
-        }
-        if (TELNYX_OUTGOING_HANDOFF_MODE or "direct").strip().lower() == "amd":
-            dial_payload["answering_machine_detection"] = TELNYX_OUTGOING_AMD_MODE
-        result = await dial_call(dial_payload)
-        data = result.get("data") or {}
-        call.telnyx_call_control_id = str(data.get("call_control_id") or call.telnyx_call_control_id or "")
-        call.telnyx_call_leg_id = str(data.get("call_leg_id") or call.telnyx_call_leg_id or "")
-        call.telnyx_call_session_id = str(data.get("call_session_id") or call.telnyx_call_session_id or "")
-        call.status = "dialing"
-        outgoing_db.flush()
-        _flash(request, "success", f"Outgoing call started to {target_number}")
+        if provider == "telnyx":
+            client_state = encode_client_state(
+                {
+                    "provider": "telnyx",
+                    "mode": "outgoing",
+                    "tenant_id": tenant.id,
+                    "tenant_slug": tenant.slug,
+                    "outgoing_call_id": call.id,
+                    "target_number": target_number,
+                    "from_number": from_number,
+                }
+            )
+            dial_payload = {
+                "connection_id": profile.telnyx_connection_id,
+                "to": target_number,
+                "from": from_number,
+                "from_display_name": profile.caller_display_name or tenant.display_name,
+                "webhook_url": f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/telnyx/webhook",
+                "webhook_url_method": "POST",
+                "client_state": client_state,
+                "command_id": telnyx_command_id("outgoing-dial", call.id),
+            }
+            if (TELNYX_OUTGOING_HANDOFF_MODE or "direct").strip().lower() == "amd":
+                dial_payload["answering_machine_detection"] = TELNYX_OUTGOING_AMD_MODE
+            result = await telnyx_dial_call(dial_payload)
+            data = result.get("data") or {}
+            call.telnyx_call_control_id = str(data.get("call_control_id") or call.telnyx_call_control_id or "")
+            call.provider_call_sid = call.telnyx_call_control_id or call.provider_call_sid or ""
+            call.telnyx_call_leg_id = str(data.get("call_leg_id") or call.telnyx_call_leg_id or "")
+            call.telnyx_call_session_id = str(data.get("call_session_id") or call.telnyx_call_session_id or "")
+            call.status = "dialing"
+            outgoing_db.flush()
+        else:
+            twiml_url = f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/twilio/twiml?outgoing_call_id={call.id}"
+            status_callback = f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/twilio/status?outgoing_call_id={call.id}"
+            result = await twilio_dial_call(
+                to=target_number,
+                from_number=from_number,
+                url=twiml_url,
+                status_callback=status_callback,
+            )
+            call.twilio_call_sid = str(result.get("sid") or call.twilio_call_sid or "")
+            call.provider_call_sid = call.twilio_call_sid or call.provider_call_sid or ""
+            call.status = str(result.get("status") or "queued").strip().lower() or "queued"
+            outgoing_db.flush()
+        _flash(request, "success", f"Outgoing {provider} call started to {target_number}")
     except Exception as exc:
         call.status = "failed"
         call.last_error = str(exc)

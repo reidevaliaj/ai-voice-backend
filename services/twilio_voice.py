@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Iterable
+from urllib.parse import urlencode
 
 import httpx
 
@@ -37,9 +38,14 @@ async def _post_twilio_request(path: str, data: dict[str, Any] | Iterable[tuple[
     account_sid, auth_token = _twilio_auth()
     url = f"{TWILIO_API_BASE_URL.rstrip('/')}/Accounts/{account_sid}/{path.lstrip('/')}"
     timeout = httpx.Timeout(15.0, connect=8.0)
-    headers = {"Accept": "application/json"}
+    items = list(data.items()) if isinstance(data, dict) else list(data)
+    body = urlencode(items, doseq=True)
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
     async with httpx.AsyncClient(timeout=timeout, auth=(account_sid, auth_token)) as client:
-        response = await client.post(url, headers=headers, data=data)
+        response = await client.post(url, headers=headers, content=body)
         if response.is_error:
             detail = _extract_twilio_error(response)
             logger.error("[TWILIO] path=%s status=%s error=%s", path, response.status_code, detail)

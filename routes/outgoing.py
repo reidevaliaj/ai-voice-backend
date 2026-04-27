@@ -75,6 +75,16 @@ class OutgoingTranscriptPayload(BaseModel):
     messages: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class OutgoingEndCallRequest(BaseModel):
+    tenant_id: str = ""
+    tenant_slug: str = ""
+    outgoing_call_id: str = ""
+    call_sid: str = ""
+    reason: str = ""
+    notes: str = ""
+    timestamp: int = 0
+
+
 def _require_internal_api_key(x_internal_api_key: str | None = Header(default=None)) -> None:
     if FASTAPI_INTERNAL_API_KEY and x_internal_api_key != FASTAPI_INTERNAL_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid internal API key")
@@ -320,6 +330,7 @@ async def _request_livekit_transfer(
         {
             "to": LIVEKIT_OUTGOING_SIP_URI,
             "timeout_secs": 20,
+            "early_media": False,
             "sip_auth_username": LIVEKIT_OUTGOING_SIP_USERNAME,
             "sip_auth_password": LIVEKIT_OUTGOING_SIP_PASSWORD,
             "sip_transport_protocol": _telnyx_transport_protocol(LIVEKIT_OUTGOING_SIP_URI),
@@ -341,6 +352,77 @@ async def _request_livekit_transfer(
             ],
         },
     )
+
+
+@router.post("/outgoing/calls/end")
+async def outgoing_end_call(
+    payload: OutgoingEndCallRequest,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+    _: None = Depends(_require_internal_api_key),
+):
+    tenant = None
+    if payload.tenant_id:
+        tenant = get_tenant_by_id(db, payload.tenant_id)
+    if tenant is None and payload.tenant_slug:
+        tenant = get_tenant_by_slug(db, payload.tenant_slug)
+
+    call = get_outgoing_call(
+        outgoing_db,
+        outgoing_call_id=payload.outgoing_call_id,
+        telnyx_call_control_id=payload.call_sid,
+        tenant_id=tenant.id if tenant else "",
+    )
+    if call is None:
+        raise HTTPException(status_code=404, detail="Outgoing call not found")
+
+    update_outgoing_call_extra(
+        outgoing_db,
+        call,
+        {
+            "assistant_end_requested": True,
+            "assistant_end_reason": str(payload.reason or "assistant_goodbye"),
+            "assistant_end_notes": str(payload.notes or ""),
+            "assistant_end_requested_at": _format_timestamp(payload.timestamp) or datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    try:
+        if call.telnyx_call_control_id:
+            await hangup_call(
+                call.telnyx_call_control_id,
+                {
+                    "command_id": telnyx_command_id("outgoing-end", call.telnyx_call_control_id or call.id),
+                    "client_state": encode_client_state(
+                        {
+                            "provider": "telnyx",
+                            "mode": "outgoing",
+                            "tenant_id": call.tenant_id,
+                            "tenant_slug": call.tenant_slug,
+                            "outgoing_call_id": call.id,
+                            "reason": "assistant_end",
+                        }
+                    ),
+                },
+            )
+    except Exception as exc:
+        logger.warning("[TELNYX_OUTGOING] hangup request after assistant goodbye failed call=%s error=%s", call.id, exc)
+        update_outgoing_call_extra(
+            outgoing_db,
+            call,
+            {"assistant_end_hangup_error": str(exc)},
+        )
+
+    mark_outgoing_call_status(outgoing_db, call, "completed", ended_at=call.ended_at or datetime.now(timezone.utc))
+    log_outgoing_event(
+        outgoing_db,
+        tenant_id=call.tenant_id,
+        tenant_slug=call.tenant_slug,
+        event_type="assistant_end_request",
+        payload=payload.model_dump(),
+        call=call,
+        room_name=call.livekit_room_name,
+    )
+    return {"ok": True, "call_id": call.id}
 
 
 async def _hangup_machine_answer(tenant: Any, call: Any, outgoing_db: Session, reason: str) -> None:

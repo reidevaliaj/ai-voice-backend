@@ -229,6 +229,9 @@
 
 <section class="panel" style="margin-top: 18px;">
   <h2>Recent Outgoing Calls</h2>
+  <form method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/sync" class="actions" style="margin-bottom: 10px;">
+    <button type="submit" class="secondary">Sync Recent Calls With Provider</button>
+  </form>
   <table>
     <thead>
       <tr>
@@ -386,6 +389,7 @@
     const voiceSelect = document.getElementById("tts-voice-select");
     const voiceStatus = document.getElementById("tts-voice-status");
     let sttTouched = false;
+    let refreshInFlight = false;
 
     function escapeHtml(value) {
       return String(value ?? "")
@@ -436,6 +440,10 @@
     }
 
     async function refreshDebug() {
+      if (refreshInFlight) {
+        return;
+      }
+      refreshInFlight = true;
       try {
         const response = await fetch(debugUrl, { headers: { "X-Requested-With": "fetch" } });
         if (!response.ok) {
@@ -456,6 +464,8 @@
         }
       } catch (error) {
         console.error("Failed to refresh outgoing debug log", error);
+      } finally {
+        refreshInFlight = false;
       }
     }
 

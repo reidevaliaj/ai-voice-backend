@@ -1,4 +1,6 @@
 import json
+import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -71,6 +73,7 @@ from tools.zoom_meetings import ZoomContext, validate_zoom_context
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
+logger = logging.getLogger("admin")
 
 OUTGOING_ACTIVE_STATUSES = {
     "queued",
@@ -282,6 +285,7 @@ def _integration_summary(session: Session, tenant_id: str) -> dict[str, dict[str
 
 async def _sync_recent_outgoing_calls_with_telnyx(outgoing_db: Session, calls: list[Any]) -> list[Any]:
     synced: list[Any] = []
+    started = time.perf_counter()
     for call in calls:
         if (
             getattr(call, "provider", "telnyx") != "telnyx"
@@ -293,8 +297,18 @@ async def _sync_recent_outgoing_calls_with_telnyx(outgoing_db: Session, calls: l
         try:
             provider_payload = await get_call_details(call.telnyx_call_control_id)
             synced.append(sync_outgoing_call_from_provider(outgoing_db, call, provider_payload))
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[OUTGOING_SYNC] provider sync failed call_id=%s provider=%s status=%s error=%s",
+                getattr(call, "id", ""),
+                getattr(call, "provider", ""),
+                getattr(call, "status", ""),
+                exc,
+            )
             synced.append(call)
+    elapsed = time.perf_counter() - started
+    if elapsed > 1.0:
+        logger.warning("[OUTGOING_SYNC] synced_recent_calls count=%s elapsed=%.3fs", len(calls), elapsed)
     return synced
 
 
@@ -544,10 +558,7 @@ async def tenant_outgoing_detail(
         voice_options = get_cartesia_voice_options(selected_language, selected_voice=selected_voice)
     except Exception as exc:
         voice_error = str(exc)
-    recent_calls = await _sync_recent_outgoing_calls_with_telnyx(
-        outgoing_db,
-        list_recent_outgoing_calls(outgoing_db, tenant.id),
-    )
+    recent_calls = list_recent_outgoing_calls(outgoing_db, tenant.id)
     outgoing_debug_timeline = _build_debug_timeline(OUTGOING_AGENT_DEBUG_LOG_PATH)
     return templates.TemplateResponse(
         request,
@@ -590,10 +601,7 @@ async def outgoing_debug_log(
     tenant = get_tenant_by_slug(db, slug)
     if tenant is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    recent_calls = await _sync_recent_outgoing_calls_with_telnyx(
-        outgoing_db,
-        list_recent_outgoing_calls(outgoing_db, tenant.id),
-    )
+    recent_calls = list_recent_outgoing_calls(outgoing_db, tenant.id)
     outgoing_debug_timeline = _build_debug_timeline(OUTGOING_AGENT_DEBUG_LOG_PATH)
     return JSONResponse(
         {
@@ -671,6 +679,24 @@ async def clear_outgoing_events_action(
         raise HTTPException(status_code=404, detail="Tenant not found")
     deleted = clear_outgoing_events(outgoing_db, tenant.id)
     _flash(request, "success", f"Cleared {deleted} outgoing event(s)")
+    return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+
+@router.post("/admin/tenants/{slug}/outgoing/sync")
+async def sync_outgoing_calls_action(
+    slug: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    recent_calls = list_recent_outgoing_calls(outgoing_db, tenant.id)
+    synced_calls = await _sync_recent_outgoing_calls_with_telnyx(outgoing_db, recent_calls)
+    active_count = sum(1 for call in synced_calls if getattr(call, "status", "") in OUTGOING_ACTIVE_STATUSES)
+    _flash(request, "success", f"Provider sync completed for {len(synced_calls)} call(s). Active after sync: {active_count}.")
     return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
 
 

@@ -315,6 +315,9 @@
 <section class="panel" style="margin-top: 18px;">
   <h2>Outgoing Call Timing</h2>
   <p class="muted">Calculated from the latest outgoing debug session so you can see elapsed seconds and delta per step.</p>
+  <div class="actions" style="margin-bottom: 10px;">
+    <button type="button" id="refresh-outgoing-debug" class="secondary">Refresh Debug Once</button>
+  </div>
   <div id="outgoing-debug-summary" class="muted" style="margin-bottom: 10px;">
     {% if outgoing_agent_debug_timeline.summary %}
       <div>Total session: <code>{{ outgoing_agent_debug_timeline.summary.session_duration_sec }}</code>s</div>
@@ -388,6 +391,7 @@
     const sttSelect = document.querySelector('select[name="stt_language"]');
     const voiceSelect = document.getElementById("tts-voice-select");
     const voiceStatus = document.getElementById("tts-voice-status");
+    const refreshDebugButton = document.getElementById("refresh-outgoing-debug");
     let sttTouched = false;
     let refreshInFlight = false;
 
@@ -469,28 +473,6 @@
       }
     }
 
-    const refreshIntervalMs = 10000;
-    let refreshHandle = null;
-
-    function startRefreshLoop() {
-      if (refreshHandle !== null) {
-        return;
-      }
-      refreshHandle = setInterval(() => {
-        if (!document.hidden) {
-          refreshDebug();
-        }
-      }, refreshIntervalMs);
-    }
-
-    function stopRefreshLoop() {
-      if (refreshHandle === null) {
-        return;
-      }
-      clearInterval(refreshHandle);
-      refreshHandle = null;
-    }
-
     function syncSttLanguage() {
       if (sttTouched || !languageSelect || !sttSelect) {
         return;
@@ -563,17 +545,11 @@
         voiceSelect.dataset.selectedVoice = voiceSelect.value || "";
       });
     }
-
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) {
-        stopRefreshLoop();
-        return;
-      }
-      refreshDebug();
-      startRefreshLoop();
-    });
-
-    startRefreshLoop();
+    if (refreshDebugButton) {
+      refreshDebugButton.addEventListener("click", () => {
+        refreshDebug();
+      });
+    }
     syncSttLanguage();
     refreshVoices();
   })();

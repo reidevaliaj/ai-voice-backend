@@ -31,6 +31,12 @@ def _extract_twilio_error(response: httpx.Response) -> str:
     code = str(payload.get("code") or "").strip()
     more_info = str(payload.get("more_info") or "").strip()
     parts = [part for part in [message, f"Twilio code {code}" if code else "", more_info] if part]
+    if code == "21216":
+        parts.append(
+            "Twilio blocked the outbound call before connecting it. "
+            "For +1 destinations this often means the account needs a valid Primary Customer Profile in Trust Hub, "
+            "or Twilio flagged the destination/range as high risk."
+        )
     return " | ".join(parts) if parts else str(payload)
 
 

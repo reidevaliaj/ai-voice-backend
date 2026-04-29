@@ -310,6 +310,49 @@
 </section>
 
 <section class="panel" style="margin-top: 18px;">
+  <h2>Outgoing Call Timing</h2>
+  <p class="muted">Calculated from the latest outgoing debug session so you can see elapsed seconds and delta per step.</p>
+  <div id="outgoing-debug-summary" class="muted" style="margin-bottom: 10px;">
+    {% if outgoing_agent_debug_timeline.summary %}
+      <div>Total session: <code>{{ outgoing_agent_debug_timeline.summary.session_duration_sec }}</code>s</div>
+      <div>First AI speaking: <code>{{ outgoing_agent_debug_timeline.summary.first_agent_speaking_sec if outgoing_agent_debug_timeline.summary.first_agent_speaking_sec is not none else '-' }}</code>s</div>
+      <div>Opening committed: <code>{{ outgoing_agent_debug_timeline.summary.first_assistant_committed_sec if outgoing_agent_debug_timeline.summary.first_assistant_committed_sec is not none else '-' }}</code>s</div>
+      <div>First user speaking: <code>{{ outgoing_agent_debug_timeline.summary.first_user_speaking_sec if outgoing_agent_debug_timeline.summary.first_user_speaking_sec is not none else '-' }}</code>s</div>
+      <div>First user committed: <code>{{ outgoing_agent_debug_timeline.summary.first_user_committed_sec if outgoing_agent_debug_timeline.summary.first_user_committed_sec is not none else '-' }}</code>s</div>
+      <div>First tool executed: <code>{{ outgoing_agent_debug_timeline.summary.first_tool_executed_sec if outgoing_agent_debug_timeline.summary.first_tool_executed_sec is not none else '-' }}</code>s</div>
+    {% else %}
+      <div>No parsed timing session yet.</div>
+    {% endif %}
+  </div>
+  <div style="overflow-x: auto;">
+    <table id="outgoing-debug-timeline-table">
+      <thead>
+        <tr>
+          <th>Elapsed (s)</th>
+          <th>Delta (s)</th>
+          <th>Category</th>
+          <th>Event</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for entry in outgoing_agent_debug_timeline.entries %}
+        <tr>
+          <td><code>{{ entry.elapsed_sec }}</code></td>
+          <td><code>{{ entry.delta_prev_sec }}</code></td>
+          <td>{{ entry.category }}</td>
+          <td>{{ entry.event }}</td>
+          <td>{{ entry.fields_summary }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">No parsed timing events yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel" style="margin-top: 18px;">
   <h2>Outgoing Call Debug</h2>
   <p class="muted">Source: <code id="outgoing-debug-path">{{ outgoing_agent_debug_log.path }}</code></p>
   <form method="post" action="/admin/tenants/{{ tenant.slug }}/clear-log" class="actions" style="margin-bottom: 10px;">
@@ -336,11 +379,61 @@
     const runtimeLog = document.getElementById("outgoing-runtime-log");
     const debugPath = document.getElementById("outgoing-debug-path");
     const runtimePath = document.getElementById("outgoing-runtime-path");
+    const debugSummary = document.getElementById("outgoing-debug-summary");
+    const timelineTableBody = document.querySelector("#outgoing-debug-timeline-table tbody");
     const languageSelect = document.querySelector('select[name="assistant_language"]');
     const sttSelect = document.querySelector('select[name="stt_language"]');
     const voiceSelect = document.getElementById("tts-voice-select");
     const voiceStatus = document.getElementById("tts-voice-status");
     let sttTouched = false;
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function renderDebugSummary(summary) {
+      if (!debugSummary) {
+        return;
+      }
+      if (!summary || !Object.keys(summary).length) {
+        debugSummary.innerHTML = "<div>No parsed timing session yet.</div>";
+        return;
+      }
+      const value = (item) => (item === null || item === undefined || item === "" ? "-" : item);
+      debugSummary.innerHTML = `
+        <div>Total session: <code>${escapeHtml(value(summary.session_duration_sec))}</code>s</div>
+        <div>First AI speaking: <code>${escapeHtml(value(summary.first_agent_speaking_sec))}</code>s</div>
+        <div>Opening committed: <code>${escapeHtml(value(summary.first_assistant_committed_sec))}</code>s</div>
+        <div>First user speaking: <code>${escapeHtml(value(summary.first_user_speaking_sec))}</code>s</div>
+        <div>First user committed: <code>${escapeHtml(value(summary.first_user_committed_sec))}</code>s</div>
+        <div>First tool executed: <code>${escapeHtml(value(summary.first_tool_executed_sec))}</code>s</div>
+      `;
+    }
+
+    function renderTimeline(entries) {
+      if (!timelineTableBody) {
+        return;
+      }
+      const rows = Array.isArray(entries) ? entries : [];
+      if (!rows.length) {
+        timelineTableBody.innerHTML = '<tr><td colspan="5" class="muted">No parsed timing events yet.</td></tr>';
+        return;
+      }
+      timelineTableBody.innerHTML = rows.map((entry) => `
+        <tr>
+          <td><code>${escapeHtml(entry.elapsed_sec)}</code></td>
+          <td><code>${escapeHtml(entry.delta_prev_sec)}</code></td>
+          <td>${escapeHtml(entry.category || "")}</td>
+          <td>${escapeHtml(entry.event || "")}</td>
+          <td>${escapeHtml(entry.fields_summary || "")}</td>
+        </tr>
+      `).join("");
+    }
 
     async function refreshDebug() {
       try {
@@ -352,6 +445,10 @@
         if (payload.outgoing_agent_debug_log) {
           debugLog.textContent = payload.outgoing_agent_debug_log.content || "No outgoing debug log content yet.";
           debugPath.textContent = payload.outgoing_agent_debug_log.path || "";
+        }
+        if (payload.outgoing_agent_debug_timeline) {
+          renderDebugSummary(payload.outgoing_agent_debug_timeline.summary);
+          renderTimeline(payload.outgoing_agent_debug_timeline.entries);
         }
         if (payload.outgoing_agent_runtime_log) {
           runtimeLog.textContent = payload.outgoing_agent_runtime_log.content || "No outgoing runtime log content yet.";

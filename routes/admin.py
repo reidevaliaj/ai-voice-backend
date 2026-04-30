@@ -51,6 +51,7 @@ from services.outgoing import (
     outgoing_profile_form_payload,
     save_outgoing_profile,
     sync_outgoing_call_from_provider,
+    update_outgoing_call_extra,
     upsert_outgoing_number,
 )
 from services.telnyx_voice import (

@@ -195,7 +195,8 @@ def _to_html(text: str) -> str:
 
 def _email_targets_from_runtime(runtime: dict[str, Any]) -> list[str]:
     config = runtime["config"]
-    email_settings = runtime["integrations"]["email"].get("settings") or {}
+    integrations = runtime.get("integrations") or {}
+    email_settings = ((integrations.get("email") or {}).get("settings")) or {}
     config_targets = [item for item in config.get("notification_targets") or [] if item]
     integration_targets = [item for item in email_settings.get("notification_targets") or [] if item]
     targets = list(config_targets or integration_targets)
@@ -213,7 +214,8 @@ def _send_outgoing_email_summary(
     call: Any,
 ) -> dict[str, Any]:
     config = runtime["config"]
-    email_settings = runtime["integrations"]["email"].get("settings") or {}
+    integrations = runtime.get("integrations") or {}
+    email_settings = ((integrations.get("email") or {}).get("settings")) or {}
     targets = _email_targets_from_runtime(runtime)
     subject = (
         f"[AI Voice] {config['business_name']} outgoing call summary - "
@@ -692,82 +694,102 @@ async def outgoing_transcript_event(
     )
     if tenant is None:
         tenant = get_tenant_by_id(db, call.tenant_id)
-    if tenant is None:
-        raise HTTPException(status_code=404, detail="Tenant not found for outgoing transcript")
+    try:
+        if tenant is None:
+            raise LookupError("Tenant not found for outgoing transcript")
 
-    runtime = build_outgoing_runtime(
-        db,
-        outgoing_db,
-        tenant=tenant,
-        call_sid=call.provider_call_sid,
-        call_control_id=call.telnyx_call_control_id,
-        outgoing_call_id=call.id,
-        room_name=payload.room_name,
-    )
-    analysis = analyze_outgoing_transcript(
-        payload.transcript,
-        payload.messages,
-        current_time_utc_iso=_format_timestamp(payload.timestamp),
-        business_timezone=runtime["config"]["timezone"],
-        business_context={
-            "business_name": runtime["config"]["business_name"],
-            "assistant_language": runtime["outgoing"].get("assistant_language") or runtime["config"]["assistant_language"],
-        },
-        outgoing_context={
-            "opening_phrase": runtime["outgoing"].get("opening_phrase", ""),
-            "system_prompt": runtime["outgoing"].get("system_prompt", ""),
-            "notes": runtime["outgoing"].get("notes", ""),
-            "target_name": runtime["call"].get("target_name", ""),
-            "target_number": runtime["call"].get("target_number", ""),
-        },
-    )
-    update_outgoing_call_extra(
-        outgoing_db,
-        call,
-        {
-            "outgoing_transcript_analysis": analysis,
-            "interest_status": str(analysis.get("interest_status") or "unclear"),
-            "interested": bool(analysis.get("interested", False)),
-            "callback_requested": bool(analysis.get("callback_requested", False)),
-            "callback_time_window": str(analysis.get("callback_time_window") or ""),
-            "consultation_time_window": str(analysis.get("consultation_time_window") or ""),
-            "next_step": str(analysis.get("next_step") or ""),
-            "objections": str(analysis.get("objections") or ""),
-        },
-    )
-    analysis_event = {
-        "tenant_id": call.tenant_id,
-        "tenant_slug": call.tenant_slug,
-        "outgoing_call_id": call.id,
-        "room_name": payload.room_name,
-        "analysis": analysis,
-    }
-    append_event("outgoing_transcript_analysis_events.jsonl", analysis_event)
-    log_outgoing_event(
-        outgoing_db,
-        tenant_id=call.tenant_id,
-        tenant_slug=call.tenant_slug,
-        event_type="outgoing_transcript_analysis",
-        payload=analysis_event,
-        call=call,
-        room_name=payload.room_name,
-    )
-    if runtime["config"]["enabled_tools"].get("email_summary", True):
-        email_event = _send_outgoing_email_summary(
-            payload=payload,
-            analysis=analysis,
-            runtime=runtime,
-            call=call,
+        runtime = build_outgoing_runtime(
+            db,
+            outgoing_db,
+            tenant=tenant,
+            call_sid=call.provider_call_sid,
+            call_control_id=call.telnyx_call_control_id,
+            outgoing_call_id=call.id,
+            room_name=payload.room_name,
         )
+        analysis = analyze_outgoing_transcript(
+            payload.transcript,
+            payload.messages,
+            current_time_utc_iso=_format_timestamp(payload.timestamp),
+            business_timezone=runtime["config"]["timezone"],
+            business_context={
+                "business_name": runtime["config"]["business_name"],
+                "assistant_language": runtime["outgoing"].get("assistant_language") or runtime["config"]["assistant_language"],
+            },
+            outgoing_context={
+                "opening_phrase": runtime["outgoing"].get("opening_phrase", ""),
+                "system_prompt": runtime["outgoing"].get("system_prompt", ""),
+                "notes": runtime["outgoing"].get("notes", ""),
+                "target_name": runtime["call"].get("target_name", ""),
+                "target_number": runtime["call"].get("target_number", ""),
+            },
+        )
+        update_outgoing_call_extra(
+            outgoing_db,
+            call,
+            {
+                "outgoing_transcript_analysis": analysis,
+                "interest_status": str(analysis.get("interest_status") or "unclear"),
+                "interested": bool(analysis.get("interested", False)),
+                "callback_requested": bool(analysis.get("callback_requested", False)),
+                "callback_time_window": str(analysis.get("callback_time_window") or ""),
+                "consultation_time_window": str(analysis.get("consultation_time_window") or ""),
+                "next_step": str(analysis.get("next_step") or ""),
+                "objections": str(analysis.get("objections") or ""),
+            },
+        )
+        analysis_event = {
+            "tenant_id": call.tenant_id,
+            "tenant_slug": call.tenant_slug,
+            "outgoing_call_id": call.id,
+            "room_name": payload.room_name,
+            "analysis": analysis,
+        }
+        append_event("outgoing_transcript_analysis_events.jsonl", analysis_event)
         log_outgoing_event(
             outgoing_db,
             tenant_id=call.tenant_id,
             tenant_slug=call.tenant_slug,
-            event_type="outgoing_email_summary_sent",
-            payload=email_event,
+            event_type="outgoing_transcript_analysis",
+            payload=analysis_event,
             call=call,
             room_name=payload.room_name,
         )
+        if runtime["config"]["enabled_tools"].get("email_summary", True):
+            email_event = _send_outgoing_email_summary(
+                payload=payload,
+                analysis=analysis,
+                runtime=runtime,
+                call=call,
+            )
+            log_outgoing_event(
+                outgoing_db,
+                tenant_id=call.tenant_id,
+                tenant_slug=call.tenant_slug,
+                event_type="outgoing_email_summary_sent",
+                payload=email_event,
+                call=call,
+                room_name=payload.room_name,
+            )
+    except Exception as exc:
+        logger.exception("Outgoing transcript post-processing failed call_id=%s", call.id)
+        try:
+            update_outgoing_call_extra(
+                outgoing_db,
+                call,
+                {"outgoing_transcript_postprocess_error": str(exc)},
+            )
+            log_outgoing_event(
+                outgoing_db,
+                tenant_id=call.tenant_id,
+                tenant_slug=call.tenant_slug,
+                event_type="outgoing_transcript_postprocess_error",
+                payload={"error": str(exc), "room_name": payload.room_name, "outgoing_call_id": call.id},
+                call=call,
+                room_name=payload.room_name,
+            )
+        except Exception:
+            logger.exception("Failed to persist outgoing transcript post-process error call_id=%s", call.id)
     return {"ok": True, "call_id": call.id}
 
 

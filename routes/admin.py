@@ -40,17 +40,23 @@ from outgoing_db import get_outgoing_db
 from models import AdminUser, CallEvent, Tenant, TenantPhoneNumber
 from security import decrypt_json, mask_secret, verify_password
 from services.cartesia import get_cartesia_voice_options
-from services.livekit_voice import create_agent_dispatch, ensure_telnyx_outbound_trunk
+from services.livekit_voice import cleanup_outgoing_room, create_agent_dispatch, ensure_telnyx_outbound_trunk
 from services.outgoing import (
     clear_outgoing_events,
     create_outgoing_call,
+    delete_outgoing_prompt_tool,
     ensure_outgoing_profile,
     get_default_outgoing_number,
+    get_outgoing_call,
+    list_outgoing_prompt_tools,
     list_outgoing_numbers,
     list_recent_outgoing_calls,
     outgoing_profile_form_payload,
     save_outgoing_profile,
+    save_outgoing_prompt_tool,
     sync_outgoing_call_from_provider,
+    mark_outgoing_call_status,
+    log_outgoing_event,
     update_outgoing_call_extra,
     upsert_outgoing_number,
 )
@@ -59,6 +65,7 @@ from services.telnyx_voice import (
     encode_client_state,
     ensure_outbound_recording_for_connection,
     get_call_details,
+    hangup_call as telnyx_hangup_call,
     list_call_recordings,
     telnyx_command_id,
 )
@@ -83,6 +90,7 @@ from services.tenants import (
     upsert_phone_number,
 )
 from services.twilio_voice import dial_call as twilio_dial_call
+from services.twilio_voice import hangup_call as twilio_hangup_call
 from tools.email_resend import send_email_resend
 from tools.google_calendar import CalendarContext, validate_calendar_context
 from tools.zoom_meetings import ZoomContext, validate_zoom_context
@@ -791,6 +799,7 @@ async def tenant_outgoing_detail(
         voice_error = str(exc)
     recent_calls = list_recent_outgoing_calls(outgoing_db, tenant.id)
     recent_calls = await _enrich_recent_outgoing_calls_with_recordings(outgoing_db, recent_calls)
+    outgoing_prompt_tools = list_outgoing_prompt_tools(outgoing_db, tenant.id)
     outgoing_debug_timeline = _build_debug_timeline(OUTGOING_AGENT_DEBUG_LOG_PATH)
     return templates.TemplateResponse(
         request,
@@ -803,8 +812,10 @@ async def tenant_outgoing_detail(
             "outgoing_profile_form": outgoing_profile_form_payload(profile, tenant),
             "outgoing_numbers": outgoing_numbers,
             "active_provider_numbers": provider_numbers,
-            "recent_outgoing_calls": recent_calls,
-            "outgoing_agent_debug_log": outgoing_debug_timeline["log"],
+              "recent_outgoing_calls": recent_calls,
+              "outgoing_prompt_tools": outgoing_prompt_tools,
+              "outgoing_active_statuses": sorted(OUTGOING_ACTIVE_STATUSES),
+              "outgoing_agent_debug_log": outgoing_debug_timeline["log"],
             "outgoing_agent_debug_timeline": outgoing_debug_timeline,
             "telnyx_key_configured": bool(TELNYX_API_KEY),
             "twilio_key_configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN),
@@ -869,9 +880,60 @@ async def save_outgoing_config(
         "system_prompt": str(form.get("system_prompt") or "").strip(),
         "caller_display_name": str(form.get("caller_display_name") or tenant.display_name).strip(),
         "notes": str(form.get("notes") or "").strip(),
+        "summary_notification_targets": str(form.get("summary_notification_targets") or "").strip(),
+        "summary_from_email": str(form.get("summary_from_email") or "").strip(),
+        "summary_reply_to_email": str(form.get("summary_reply_to_email") or "").strip(),
     }
     save_outgoing_profile(outgoing_db, tenant, payload, active_config=get_active_config(db, tenant.id))
     _flash(request, "success", "Outgoing call settings saved")
+    return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+
+@router.post("/admin/tenants/{slug}/outgoing/tools")
+async def save_outgoing_prompt_tool_action(
+    slug: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    form = await request.form()
+    try:
+        save_outgoing_prompt_tool(
+            outgoing_db,
+            tenant,
+            tool_id=str(form.get("tool_id") or "").strip(),
+            name=str(form.get("name") or "").strip(),
+            content=str(form.get("content") or "").strip(),
+            status=str(form.get("status") or "active").strip(),
+            active_config=get_active_config(db, tenant.id),
+        )
+        _flash(request, "success", "Outgoing knowledge tool saved")
+    except Exception as exc:
+        _flash(request, "error", f"Could not save outgoing knowledge tool: {exc}")
+    return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+
+@router.post("/admin/tenants/{slug}/outgoing/tools/{tool_id}/delete")
+async def delete_outgoing_prompt_tool_action(
+    slug: str,
+    tool_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    deleted = delete_outgoing_prompt_tool(outgoing_db, tenant.id, tool_id)
+    if deleted:
+        _flash(request, "success", "Outgoing knowledge tool deleted")
+    else:
+        _flash(request, "error", "Outgoing knowledge tool not found")
     return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
 
 
@@ -907,6 +969,82 @@ async def sync_outgoing_calls_action(
     synced_calls = await _enrich_recent_outgoing_calls_with_recordings(outgoing_db, synced_calls)
     active_count = sum(1 for call in synced_calls if getattr(call, "status", "") in OUTGOING_ACTIVE_STATUSES)
     _flash(request, "success", f"Provider sync completed for {len(synced_calls)} call(s). Active after sync: {active_count}.")
+    return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+
+@router.post("/admin/tenants/{slug}/outgoing/calls/{call_id}/hangup")
+async def manual_hangup_outgoing_call_action(
+    slug: str,
+    call_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    call = get_outgoing_call(outgoing_db, outgoing_call_id=call_id)
+    if call is None or call.tenant_id != tenant.id:
+        _flash(request, "error", "Outgoing call not found")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+    if call.status not in OUTGOING_ACTIVE_STATUSES:
+        _flash(request, "info", f"Call is already {call.status}")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+    update_outgoing_call_extra(
+        outgoing_db,
+        call,
+        {
+            "manual_hangup_requested": True,
+            "manual_hangup_requested_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    provider = str(call.provider or "telnyx").strip().lower() or "telnyx"
+    try:
+        if provider == "telnyx" and (call.extra_json or {}).get("livekit_first") and call.livekit_room_name:
+            await cleanup_outgoing_room(
+                room_name=call.livekit_room_name,
+                participant_identity=str((call.extra_json or {}).get("livekit_participant_identity") or ""),
+                dispatch_id=str((call.extra_json or {}).get("livekit_dispatch_id") or ""),
+            )
+        elif provider == "telnyx" and call.telnyx_call_control_id:
+            await telnyx_hangup_call(
+                call.telnyx_call_control_id,
+                {
+                    "command_id": telnyx_command_id("admin-manual-hangup", call.telnyx_call_control_id or call.id),
+                    "client_state": encode_client_state(
+                        {
+                            "provider": "telnyx",
+                            "mode": "outgoing",
+                            "tenant_id": call.tenant_id,
+                            "tenant_slug": call.tenant_slug,
+                            "outgoing_call_id": call.id,
+                            "reason": "admin_manual_hangup",
+                        }
+                    ),
+                },
+            )
+        elif provider == "twilio" and call.twilio_call_sid:
+            await twilio_hangup_call(call.twilio_call_sid)
+        else:
+            raise RuntimeError("No active provider-side call handle was available")
+    except Exception as exc:
+        update_outgoing_call_extra(outgoing_db, call, {"manual_hangup_error": str(exc)})
+        _flash(request, "error", f"Could not hang up the call: {exc}")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+    mark_outgoing_call_status(outgoing_db, call, "completed", ended_at=call.ended_at or datetime.now(timezone.utc))
+    log_outgoing_event(
+        outgoing_db,
+        tenant_id=call.tenant_id,
+        tenant_slug=call.tenant_slug,
+        event_type="admin_manual_hangup",
+        payload={"outgoing_call_id": call.id, "provider": provider, "room_name": call.livekit_room_name},
+        call=call,
+        room_name=call.livekit_room_name,
+    )
+    _flash(request, "success", f"Hangup requested for {call.target_number}")
     return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
 
 

@@ -172,10 +172,87 @@
       <textarea name="notes">{{ outgoing_profile_form.notes }}</textarea>
       <p class="muted">Use this for outbound-specific context or what the caller should be told.</p>
     </div>
+    <div class="row">
+      <div>
+        <label>Outgoing Summary Email Targets</label>
+        <textarea name="summary_notification_targets">{{ outgoing_profile_form.summary_notification_targets }}</textarea>
+        <p class="muted">Outgoing summaries are kept separate from inbound and default to <code>info@cos-st.com</code>.</p>
+      </div>
+      <div>
+        <label>Outgoing Summary From Email</label>
+        <input type="text" name="summary_from_email" value="{{ outgoing_profile_form.summary_from_email }}" placeholder="info@cos-st.com" />
+      </div>
+      <div>
+        <label>Outgoing Summary Reply-To</label>
+        <input type="text" name="summary_reply_to_email" value="{{ outgoing_profile_form.summary_reply_to_email }}" placeholder="Optional reply-to" />
+      </div>
+    </div>
     <div class="actions">
       <button type="submit">Save Outgoing Settings</button>
     </div>
   </form>
+</section>
+
+<section class="panel" style="margin-top: 18px;">
+  <h2>Outgoing Knowledge Tools</h2>
+  <p class="muted">These tools stay out of the base prompt until the agent chooses to load them during the call.</p>
+  <form method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/tools" class="stack">
+    <input type="hidden" name="tool_id" value="" />
+    <div class="row">
+      <div>
+        <label>Tool Name</label>
+        <input type="text" name="name" placeholder="Address" required />
+      </div>
+      <div>
+        <label>Status</label>
+        <select name="status">
+          <option value="active" selected>active</option>
+          <option value="inactive">inactive</option>
+        </select>
+      </div>
+    </div>
+    <div>
+      <label>Tool Content</label>
+      <textarea name="content" placeholder="Write the address-related information here." required></textarea>
+    </div>
+    <div class="actions">
+      <button type="submit">Add Knowledge Tool</button>
+    </div>
+  </form>
+
+  <table style="margin-top: 14px;">
+    <thead><tr><th>Name</th><th>Status</th><th>Content</th><th>Actions</th></tr></thead>
+    <tbody>
+      {% for tool in outgoing_prompt_tools %}
+      <tr>
+        <td>
+          <input type="hidden" name="tool_id" value="{{ tool.id }}" form="tool-edit-{{ tool.id }}" />
+          <input type="text" name="name" value="{{ tool.name }}" form="tool-edit-{{ tool.id }}" required />
+        </td>
+        <td>
+            <select name="status" form="tool-edit-{{ tool.id }}">
+              <option value="active" {% if tool.status == "active" %}selected{% endif %}>active</option>
+              <option value="inactive" {% if tool.status == "inactive" %}selected{% endif %}>inactive</option>
+            </select>
+        </td>
+        <td style="min-width: 340px;">
+            <textarea name="content" form="tool-edit-{{ tool.id }}" style="min-height: 120px;">{{ tool.content }}</textarea>
+        </td>
+        <td>
+            <div class="actions">
+              <form id="tool-edit-{{ tool.id }}" method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/tools"></form>
+              <button type="submit" form="tool-edit-{{ tool.id }}">Save</button>
+              <form method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/tools/{{ tool.id }}/delete" style="display: inline;">
+                <button type="submit" class="secondary">Delete</button>
+              </form>
+            </div>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="muted">No outgoing knowledge tools saved yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </section>
 
 <section class="panel" style="margin-top: 18px;">
@@ -244,6 +321,7 @@
         <th>Recording</th>
         <th>Room</th>
         <th>Error</th>
+        <th>Actions</th>
       </tr>
     </thead>
     <tbody>
@@ -297,9 +375,18 @@
         </td>
         <td>{{ call.livekit_room_name or "-" }}</td>
         <td>{{ call.last_error or "-" }}</td>
+        <td>
+          {% if call.status in outgoing_active_statuses %}
+          <form method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/calls/{{ call.id }}/hangup">
+            <button type="submit" class="secondary">Hang Up</button>
+          </form>
+          {% else %}
+          <span class="muted">-</span>
+          {% endif %}
+        </td>
       </tr>
       {% else %}
-      <tr><td colspan="9" class="muted">No outgoing calls launched yet.</td></tr>
+      <tr><td colspan="10" class="muted">No outgoing calls launched yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>

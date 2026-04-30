@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from outgoing_models import OutgoingCall, OutgoingCallEvent, OutgoingCallerNumber, OutgoingTenantProfile
+from outgoing_models import OutgoingCall, OutgoingCallEvent, OutgoingCallerNumber, OutgoingPromptTool, OutgoingTenantProfile
 from services.telnyx_voice import decode_client_state
 from services.tenants import (
     build_runtime_context,
@@ -19,6 +19,7 @@ from services.tenants import (
 )
 
 SUPPORTED_OUTGOING_PROVIDERS = {"telnyx", "twilio"}
+DEFAULT_OUTGOING_SUMMARY_EMAIL = "info@cos-st.com"
 
 
 def _utcnow() -> datetime:
@@ -72,6 +73,74 @@ def get_outgoing_profile(session: Session, tenant_id: str) -> OutgoingTenantProf
     return session.scalar(select(OutgoingTenantProfile).where(OutgoingTenantProfile.tenant_id == tenant_id))
 
 
+def list_outgoing_prompt_tools(session: Session, tenant_id: str) -> list[OutgoingPromptTool]:
+    stmt = (
+        select(OutgoingPromptTool)
+        .where(OutgoingPromptTool.tenant_id == tenant_id)
+        .order_by(OutgoingPromptTool.created_at.asc(), OutgoingPromptTool.name.asc())
+    )
+    return list(session.scalars(stmt))
+
+
+def save_outgoing_prompt_tool(
+    session: Session,
+    tenant: Any,
+    *,
+    tool_id: str = "",
+    name: str,
+    content: str,
+    status: str = "active",
+    active_config: Any | None = None,
+) -> OutgoingPromptTool:
+    normalized_name = str(name or "").strip()
+    normalized_content = str(content or "").strip()
+    normalized_status = str(status or "active").strip().lower() or "active"
+    if not normalized_name:
+        raise ValueError("Tool name is required")
+    if not normalized_content:
+        raise ValueError("Tool content is required")
+
+    profile = ensure_outgoing_profile(session, tenant, active_config=active_config)
+    record = None
+    if tool_id:
+        record = session.get(OutgoingPromptTool, tool_id)
+        if record is not None and record.tenant_id != tenant.id:
+            raise ValueError("Tool does not belong to this tenant")
+    if record is None:
+        stmt = select(OutgoingPromptTool).where(
+            OutgoingPromptTool.tenant_id == tenant.id,
+            OutgoingPromptTool.name == normalized_name,
+        )
+        record = session.scalar(stmt)
+    if record is None:
+        record = OutgoingPromptTool(
+            profile_id=profile.id,
+            tenant_id=tenant.id,
+            tenant_slug=tenant.slug,
+            name=normalized_name,
+            content=normalized_content,
+            status=normalized_status,
+        )
+        session.add(record)
+    else:
+        record.profile_id = profile.id
+        record.tenant_slug = tenant.slug
+        record.name = normalized_name
+        record.content = normalized_content
+        record.status = normalized_status
+    session.flush()
+    return record
+
+
+def delete_outgoing_prompt_tool(session: Session, tenant_id: str, tool_id: str) -> bool:
+    record = session.get(OutgoingPromptTool, tool_id)
+    if record is None or record.tenant_id != tenant_id:
+        return False
+    session.delete(record)
+    session.flush()
+    return True
+
+
 def ensure_outgoing_profile(session: Session, tenant: Any, active_config: Any | None = None) -> OutgoingTenantProfile:
     assistant_language = normalize_assistant_language(getattr(active_config, "assistant_language", "") if active_config else "")
     stt_language = normalize_stt_language(getattr(active_config, "stt_language", "") if active_config else "", assistant_language)
@@ -102,6 +171,9 @@ def ensure_outgoing_profile(session: Session, tenant: Any, active_config: Any | 
             system_prompt=default_outgoing_prompt(tenant.display_name, assistant_language),
             caller_display_name=tenant.display_name,
             notes="",
+            summary_notification_targets=DEFAULT_OUTGOING_SUMMARY_EMAIL,
+            summary_from_email=DEFAULT_OUTGOING_SUMMARY_EMAIL,
+            summary_reply_to_email="",
         )
         session.add(profile)
         session.flush()
@@ -135,6 +207,10 @@ def ensure_outgoing_profile(session: Session, tenant: Any, active_config: Any | 
             profile.system_prompt = default_outgoing_prompt(tenant.display_name, profile.assistant_language or assistant_language)
         if not profile.caller_display_name:
             profile.caller_display_name = tenant.display_name
+        if not profile.summary_notification_targets:
+            profile.summary_notification_targets = DEFAULT_OUTGOING_SUMMARY_EMAIL
+        if not profile.summary_from_email:
+            profile.summary_from_email = DEFAULT_OUTGOING_SUMMARY_EMAIL
 
     if active_config and not profile.caller_display_name:
         profile.caller_display_name = str(getattr(active_config, "business_name", "") or tenant.display_name)
@@ -246,6 +322,9 @@ def save_outgoing_profile(
     profile.system_prompt = str(payload.get("system_prompt") or "").strip() or default_outgoing_prompt(tenant.display_name, assistant_language)
     profile.caller_display_name = str(payload.get("caller_display_name") or tenant.display_name).strip() or tenant.display_name
     profile.notes = str(payload.get("notes") or "").strip()
+    profile.summary_notification_targets = str(payload.get("summary_notification_targets") or "").strip() or DEFAULT_OUTGOING_SUMMARY_EMAIL
+    profile.summary_from_email = str(payload.get("summary_from_email") or "").strip() or DEFAULT_OUTGOING_SUMMARY_EMAIL
+    profile.summary_reply_to_email = str(payload.get("summary_reply_to_email") or "").strip()
     session.flush()
     return profile
 
@@ -268,6 +347,9 @@ def outgoing_profile_form_payload(profile: OutgoingTenantProfile | None, tenant:
             "system_prompt": default_outgoing_prompt(tenant.display_name, assistant_language),
             "caller_display_name": tenant.display_name,
             "notes": "",
+            "summary_notification_targets": DEFAULT_OUTGOING_SUMMARY_EMAIL,
+            "summary_from_email": DEFAULT_OUTGOING_SUMMARY_EMAIL,
+            "summary_reply_to_email": "",
         }
     return {
         "status": profile.status,
@@ -284,6 +366,9 @@ def outgoing_profile_form_payload(profile: OutgoingTenantProfile | None, tenant:
         "system_prompt": profile.system_prompt,
         "caller_display_name": profile.caller_display_name,
         "notes": profile.notes,
+        "summary_notification_targets": profile.summary_notification_targets or DEFAULT_OUTGOING_SUMMARY_EMAIL,
+        "summary_from_email": profile.summary_from_email or DEFAULT_OUTGOING_SUMMARY_EMAIL,
+        "summary_reply_to_email": profile.summary_reply_to_email,
     }
 
 
@@ -638,6 +723,7 @@ def build_outgoing_runtime(
     config_version = call.tenant_config_version if call is not None else None
     runtime = build_runtime_context(primary_session, tenant, config_version=config_version)
     profile = ensure_outgoing_profile(outgoing_session, tenant, active_config=active_config)
+    prompt_tools = list_outgoing_prompt_tools(outgoing_session, tenant.id)
     effective_config = dict(runtime["config"])
     profile_min_endpointing_delay, profile_max_endpointing_delay = normalize_endpointing_window(
         profile.min_endpointing_delay,
@@ -674,6 +760,19 @@ def build_outgoing_runtime(
             "system_prompt": profile.system_prompt or default_outgoing_prompt(tenant.display_name, profile.assistant_language or effective_config.get("assistant_language") or "en"),
             "caller_display_name": profile.caller_display_name or tenant.display_name,
             "notes": profile.notes,
+            "summary_notification_targets": profile.summary_notification_targets or DEFAULT_OUTGOING_SUMMARY_EMAIL,
+            "summary_from_email": profile.summary_from_email or DEFAULT_OUTGOING_SUMMARY_EMAIL,
+            "summary_reply_to_email": profile.summary_reply_to_email or "",
+            "prompt_tools": [
+                {
+                    "id": item.id,
+                    "name": item.name,
+                    "content": item.content,
+                    "status": item.status,
+                }
+                for item in prompt_tools
+                if str(item.status or "active").strip().lower() == "active"
+            ],
         },
         "call": {
             "id": call.id if call else "",

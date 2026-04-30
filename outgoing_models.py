@@ -33,11 +33,15 @@ class OutgoingTenantProfile(OutgoingBase):
     system_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     caller_display_name: Mapped[str] = mapped_column(String(128), default="", nullable=False)
     notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    summary_notification_targets: Mapped[str] = mapped_column(Text, default="info@cos-st.com", nullable=False)
+    summary_from_email: Mapped[str] = mapped_column(String(255), default="info@cos-st.com", nullable=False)
+    summary_reply_to_email: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
 
     numbers: Mapped[list["OutgoingCallerNumber"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
     calls: Mapped[list["OutgoingCall"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
+    prompt_tools: Mapped[list["OutgoingPromptTool"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
 
 
 class OutgoingCallerNumber(OutgoingBase):
@@ -101,6 +105,25 @@ class OutgoingCall(OutgoingBase):
 
     profile: Mapped["OutgoingTenantProfile | None"] = relationship(back_populates="calls")
     events: Mapped[list["OutgoingCallEvent"]] = relationship(back_populates="call", cascade="all, delete-orphan")
+
+
+class OutgoingPromptTool(OutgoingBase):
+    __tablename__ = "outgoing_prompt_tools"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_outgoing_prompt_tool_name"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    profile_id: Mapped[str] = mapped_column(ForeignKey("outgoing_tenant_profiles.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    tenant_slug: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    profile: Mapped["OutgoingTenantProfile"] = relationship(back_populates="prompt_tools")
 
 
 class OutgoingCallEvent(OutgoingBase):

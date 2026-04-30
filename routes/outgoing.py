@@ -193,17 +193,19 @@ def _to_html(text: str) -> str:
     return (text or "").replace("\n", "<br/>")
 
 
+def _parse_email_targets(raw: str) -> list[str]:
+    values = []
+    for chunk in str(raw or "").replace(";", "\n").replace(",", "\n").splitlines():
+        item = chunk.strip()
+        if item:
+            values.append(item)
+    return values
+
+
 def _email_targets_from_runtime(runtime: dict[str, Any]) -> list[str]:
-    config = runtime["config"]
-    integrations = runtime.get("integrations") or {}
-    email_settings = ((integrations.get("email") or {}).get("settings")) or {}
-    config_targets = [item for item in config.get("notification_targets") or [] if item]
-    integration_targets = [item for item in email_settings.get("notification_targets") or [] if item]
-    targets = list(config_targets or integration_targets)
-    owner_email = str(config.get("owner_email") or "").strip()
-    if owner_email and owner_email not in targets:
-        targets.append(owner_email)
-    return [item for item in targets if item]
+    outgoing = runtime.get("outgoing") or {}
+    configured = _parse_email_targets(str(outgoing.get("summary_notification_targets") or ""))
+    return configured or ["info@cos-st.com"]
 
 
 def _send_outgoing_email_summary(
@@ -214,8 +216,7 @@ def _send_outgoing_email_summary(
     call: Any,
 ) -> dict[str, Any]:
     config = runtime["config"]
-    integrations = runtime.get("integrations") or {}
-    email_settings = ((integrations.get("email") or {}).get("settings")) or {}
+    outgoing = runtime.get("outgoing") or {}
     targets = _email_targets_from_runtime(runtime)
     subject = (
         f"[AI Voice] {config['business_name']} outgoing call summary - "
@@ -243,8 +244,8 @@ def _send_outgoing_email_summary(
     """
     sent_to: list[str] = []
     results: list[dict[str, Any]] = []
-    from_email = str(email_settings.get("from_email") or config.get("from_email") or config.get("owner_email") or "noreply@example.com")
-    reply_to = str(email_settings.get("reply_to_email") or config.get("reply_to_email") or config.get("owner_email") or "")
+    from_email = str(outgoing.get("summary_from_email") or "info@cos-st.com").strip() or "info@cos-st.com"
+    reply_to = str(outgoing.get("summary_reply_to_email") or "").strip()
     for target in targets:
         result = send_email_resend(
             to=target,

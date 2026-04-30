@@ -301,18 +301,6 @@
 </section>
 
 <section class="panel" style="margin-top: 18px;">
-  <h2>Recent Outgoing Events</h2>
-  <form method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/events/clear" class="actions" style="margin-bottom: 10px;">
-    <button type="submit" class="secondary">Clear Recent Outgoing Events</button>
-  </form>
-  {% if recent_outgoing_events %}
-  <pre>{{ recent_outgoing_events | map(attribute='payload_json') | list | tojson(indent=2) }}</pre>
-  {% else %}
-  <p class="muted">No outgoing events logged yet.</p>
-  {% endif %}
-</section>
-
-<section class="panel" style="margin-top: 18px;">
   <h2>Outgoing Call Timing</h2>
   <p class="muted">Calculated from the latest outgoing debug session so you can see elapsed seconds and delta per step.</p>
   <div class="actions" style="margin-bottom: 10px;">
@@ -368,23 +356,11 @@
   <pre id="outgoing-debug-log">{{ outgoing_agent_debug_log.content or 'No outgoing debug log content yet.' }}</pre>
 </section>
 
-<section class="panel" style="margin-top: 18px;">
-  <h2>Outgoing Agent Runtime Log</h2>
-  <p class="muted">Source: <code id="outgoing-runtime-path">{{ outgoing_agent_runtime_log.path }}</code></p>
-  <form method="post" action="/admin/tenants/{{ tenant.slug }}/clear-log" class="actions" style="margin-bottom: 10px;">
-    <input type="hidden" name="log_type" value="outgoing_runtime" />
-    <button type="submit" class="secondary">Clear Outgoing Runtime Log</button>
-  </form>
-  <pre id="outgoing-runtime-log">{{ outgoing_agent_runtime_log.content or 'No outgoing runtime log content yet.' }}</pre>
-</section>
-
 <script>
   (function () {
     const debugUrl = "/admin/tenants/{{ tenant.slug }}/outgoing/debug-log";
     const debugLog = document.getElementById("outgoing-debug-log");
-    const runtimeLog = document.getElementById("outgoing-runtime-log");
     const debugPath = document.getElementById("outgoing-debug-path");
-    const runtimePath = document.getElementById("outgoing-runtime-path");
     const debugSummary = document.getElementById("outgoing-debug-summary");
     const timelineTableBody = document.querySelector("#outgoing-debug-timeline-table tbody");
     const languageSelect = document.querySelector('select[name="assistant_language"]');
@@ -461,10 +437,6 @@
         if (payload.outgoing_agent_debug_timeline) {
           renderDebugSummary(payload.outgoing_agent_debug_timeline.summary);
           renderTimeline(payload.outgoing_agent_debug_timeline.entries);
-        }
-        if (payload.outgoing_agent_runtime_log) {
-          runtimeLog.textContent = payload.outgoing_agent_runtime_log.content || "No outgoing runtime log content yet.";
-          runtimePath.textContent = payload.outgoing_agent_runtime_log.path || "";
         }
       } catch (error) {
         console.error("Failed to refresh outgoing debug log", error);

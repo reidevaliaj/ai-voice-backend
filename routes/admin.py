@@ -39,7 +39,6 @@ from services.outgoing import (
     get_default_outgoing_number,
     list_outgoing_numbers,
     list_recent_outgoing_calls,
-    list_recent_outgoing_events,
     outgoing_profile_form_payload,
     save_outgoing_profile,
     sync_outgoing_call_from_provider,
@@ -572,10 +571,8 @@ async def tenant_outgoing_detail(
             "outgoing_numbers": outgoing_numbers,
             "active_provider_numbers": provider_numbers,
             "recent_outgoing_calls": recent_calls,
-            "recent_outgoing_events": list_recent_outgoing_events(outgoing_db, tenant.id),
             "outgoing_agent_debug_log": outgoing_debug_timeline["log"],
             "outgoing_agent_debug_timeline": outgoing_debug_timeline,
-            "outgoing_agent_runtime_log": _read_log_tail(OUTGOING_AGENT_LOG_PATH),
             "telnyx_key_configured": bool(TELNYX_API_KEY),
             "twilio_key_configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN),
             "outgoing_handoff_mode": (TELNYX_OUTGOING_HANDOFF_MODE or "direct").strip().lower(),
@@ -601,7 +598,6 @@ async def outgoing_debug_log(
     tenant = get_tenant_by_slug(db, slug)
     if tenant is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    recent_calls = list_recent_outgoing_calls(outgoing_db, tenant.id)
     outgoing_debug_timeline = _build_debug_timeline(OUTGOING_AGENT_DEBUG_LOG_PATH)
     return JSONResponse(
         {
@@ -609,26 +605,6 @@ async def outgoing_debug_log(
             "tenant": tenant.slug,
             "outgoing_agent_debug_log": outgoing_debug_timeline["log"],
             "outgoing_agent_debug_timeline": outgoing_debug_timeline,
-            "outgoing_agent_runtime_log": _read_log_tail(OUTGOING_AGENT_LOG_PATH),
-            "recent_outgoing_calls": [
-                {
-                    "id": call.id,
-                    "provider": getattr(call, "provider", "telnyx"),
-                    "status": call.status,
-                    "target_number": call.target_number,
-                    "target_name": call.target_name,
-                    "from_number": call.from_number,
-                    "created_at": call.created_at.isoformat() if call.created_at else "",
-                    "updated_at": call.updated_at.isoformat() if call.updated_at else "",
-                    "provider_call_sid": getattr(call, "provider_call_sid", ""),
-                    "telnyx_call_control_id": call.telnyx_call_control_id,
-                    "twilio_call_sid": getattr(call, "twilio_call_sid", ""),
-                    "livekit_room_name": call.livekit_room_name,
-                    "extra_json": call.extra_json or {},
-                    "last_error": call.last_error,
-                }
-                for call in recent_calls
-            ],
         }
     )
 

@@ -730,7 +730,7 @@ async def twilio_outgoing_twiml(
     sip_status_callback = _public_url(TWILIO_OUTGOING_SIP_STATUS_ROUTE) + f"?outgoing_call_id={call.id}"
 
     vr = VoiceResponse()
-    dial = vr.dial(answer_on_bridge=True, timeout=20)
+    dial = vr.dial(timeout=20)
     dial.sip(
         sip_uri,
         username=LIVEKIT_OUTGOING_SIP_USERNAME,

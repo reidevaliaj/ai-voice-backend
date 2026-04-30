@@ -631,7 +631,7 @@
       voiceStatus.textContent = "Loading Cartesia voices...";
       try {
         const response = await fetch(
-          `/admin/cartesia/voices?language=${encodeURIComponent(language)}&selected=${encodeURIComponent(selectedVoice)}`,
+          `/admin/cartesia/voices?scope=outgoing&language=${encodeURIComponent(language)}&selected=${encodeURIComponent(selectedVoice)}`,
           { headers: { "X-Requested-With": "fetch" } }
         );
         const payload = await response.json();

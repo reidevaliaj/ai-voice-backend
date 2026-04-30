@@ -9,6 +9,17 @@ CARTESIA_API_BASE = "https://api.cartesia.ai"
 VOICE_CACHE_TTL_SECONDS = 900
 
 _VOICE_CACHE: dict[str, dict[str, Any]] = {}
+OUTGOING_PINNED_CUSTOM_VOICES: list[dict[str, Any]] = [
+    {
+        "id": "2f5030a9-e4d9-4dca-bd25-31c17a7f6714",
+        "name": "Custom Trained Voice",
+        "description": "Pinned custom outgoing voice.",
+        "language": "",
+        "gender": "",
+        "is_owner": True,
+        "preview_file_url": None,
+    }
+]
 
 
 def _headers() -> dict[str, str]:
@@ -47,6 +58,21 @@ def _voice_payload(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _merge_extra_voices(voices: list[dict[str, Any]], extra_voices: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for item in list(extra_voices or []) + list(voices or []):
+        if not isinstance(item, dict):
+            continue
+        voice_id = str(item.get("id") or "").strip()
+        if not voice_id or voice_id in seen_ids:
+            continue
+        seen_ids.add(voice_id)
+        merged.append(_voice_payload(item))
+    merged.sort(key=lambda item: (not item.get("is_owner", False), str(item.get("name") or "").lower()))
+    return merged
+
+
 def _fetch_voice_list(language: str) -> list[dict[str, Any]]:
     payload = _request_json(
         "/voices",
@@ -64,7 +90,12 @@ def _fetch_voice_list(language: str) -> list[dict[str, Any]]:
     return normalized
 
 
-def get_cartesia_voice_options(language: str, *, selected_voice: str = "") -> list[dict[str, Any]]:
+def get_cartesia_voice_options(
+    language: str,
+    *,
+    selected_voice: str = "",
+    extra_voices: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     language_code = (language or "").strip().lower() or "en"
     now = time.time()
     cached = _VOICE_CACHE.get(language_code)
@@ -75,22 +106,26 @@ def get_cartesia_voice_options(language: str, *, selected_voice: str = "") -> li
         voices = _fetch_voice_list(language_code)
         _VOICE_CACHE[language_code] = {"ts": now, "voices": voices}
 
+    voices = _merge_extra_voices(voices, extra_voices=extra_voices)
+
     selected = (selected_voice or "").strip()
     if selected and not any(item["id"] == selected for item in voices):
         try:
             current_voice = _request_json(f"/voices/{selected}", query={"expand[]": "preview_file_url"})
-            voices = [_voice_payload(current_voice), *voices]
+            voices = _merge_extra_voices(voices, extra_voices=[current_voice])
         except Exception:
-            voices = [
-                {
-                    "id": selected,
-                    "name": f"Current selection ({selected[:8]})",
-                    "description": "Saved on the tenant config but not currently present in the filtered voice list.",
-                    "language": language_code,
-                    "gender": "",
-                    "is_owner": False,
-                    "preview_file_url": None,
-                },
-                *voices,
-            ]
+            voices = _merge_extra_voices(
+                voices,
+                extra_voices=[
+                    {
+                        "id": selected,
+                        "name": f"Current selection ({selected[:8]})",
+                        "description": "Saved on the tenant config but not currently present in the filtered voice list.",
+                        "language": language_code,
+                        "gender": "",
+                        "is_owner": False,
+                        "preview_file_url": None,
+                    }
+                ],
+            )
     return voices

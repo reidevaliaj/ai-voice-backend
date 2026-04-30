@@ -39,7 +39,7 @@ from db import get_db
 from outgoing_db import get_outgoing_db
 from models import AdminUser, CallEvent, Tenant, TenantPhoneNumber
 from security import decrypt_json, mask_secret, verify_password
-from services.cartesia import get_cartesia_voice_options
+from services.cartesia import OUTGOING_PINNED_CUSTOM_VOICES, get_cartesia_voice_options
 from services.livekit_voice import cleanup_outgoing_room, create_agent_dispatch, ensure_telnyx_outbound_trunk
 from services.outgoing import (
     build_outgoing_prompt_tags,
@@ -797,7 +797,11 @@ async def tenant_outgoing_detail(
     voice_options: list[dict[str, Any]] = []
     voice_error = ""
     try:
-        voice_options = get_cartesia_voice_options(selected_language, selected_voice=selected_voice)
+        voice_options = get_cartesia_voice_options(
+            selected_language,
+            selected_voice=selected_voice,
+            extra_voices=OUTGOING_PINNED_CUSTOM_VOICES,
+        )
     except Exception as exc:
         voice_error = str(exc)
     recent_calls = list_recent_outgoing_calls(outgoing_db, tenant.id)
@@ -1298,11 +1302,18 @@ async def launch_outgoing_call(
 
 
 @router.get("/admin/cartesia/voices")
-async def cartesia_voice_options(request: Request, language: str = "en", selected: str = "", db: Session = Depends(get_db)):
+async def cartesia_voice_options(
+    request: Request,
+    language: str = "en",
+    selected: str = "",
+    scope: str = "",
+    db: Session = Depends(get_db),
+):
     require_admin(request, db)
     normalized_language = normalize_assistant_language(language)
     try:
-        voices = get_cartesia_voice_options(normalized_language, selected_voice=selected)
+        extra_voices = OUTGOING_PINNED_CUSTOM_VOICES if str(scope or "").strip().lower() == "outgoing" else None
+        voices = get_cartesia_voice_options(normalized_language, selected_voice=selected, extra_voices=extra_voices)
         return JSONResponse({"ok": True, "language": normalized_language, "voices": voices})
     except Exception as exc:
         return JSONResponse({"ok": False, "language": normalized_language, "voices": [], "error": str(exc)})

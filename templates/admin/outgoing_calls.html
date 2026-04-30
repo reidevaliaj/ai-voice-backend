@@ -258,15 +258,17 @@
           {% set handoff_mode = (call.extra_json or {}).get("handoff_mode") or outgoing_handoff_mode %}
           {% set provider_reason = ((call.extra_json or {}).get("provider_client_state") or {}).get("reason") %}
           {% set amd_result = (call.extra_json or {}).get("amd_result") or provider_reason %}
-          {% if call.provider == "twilio" %}
-          <span class="pill">direct</span>
-          {% elif handoff_mode == "direct" %}
-          <span class="pill">direct</span>
-          {% elif amd_result %}
-          <span class="pill">{{ amd_result }}</span>
-          {% elif call.status == "machine_detected" %}
-          <span class="pill">machine</span>
-          {% else %}
+            {% if call.provider == "twilio" %}
+            <span class="pill">direct</span>
+            {% elif handoff_mode == "direct" %}
+            <span class="pill">direct</span>
+            {% elif handoff_mode == "livekit_first" %}
+            <span class="muted">n/a</span>
+            {% elif amd_result %}
+            <span class="pill">{{ amd_result }}</span>
+            {% elif call.status == "machine_detected" %}
+            <span class="pill">machine</span>
+            {% else %}
           <span class="muted">pending</span>
           {% endif %}
         </td>

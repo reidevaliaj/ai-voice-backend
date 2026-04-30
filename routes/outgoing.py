@@ -30,6 +30,7 @@ from app_config import (
 )
 from db import get_db
 from outgoing_db import get_outgoing_db
+from services.livekit_voice import cleanup_outgoing_room
 from services.outgoing import (
     apply_telnyx_event_to_call,
     apply_twilio_event_to_call,
@@ -94,6 +95,20 @@ class OutgoingEndCallRequest(BaseModel):
     call_sid: str = ""
     reason: str = ""
     notes: str = ""
+    timestamp: int = 0
+
+
+class OutgoingLiveKitStatusRequest(BaseModel):
+    tenant_id: str = ""
+    tenant_slug: str = ""
+    outgoing_call_id: str = ""
+    room_name: str = ""
+    status: str = ""
+    provider_call_sid: str = ""
+    participant_identity: str = ""
+    sip_status_code: str = ""
+    sip_status: str = ""
+    error: str = ""
     timestamp: int = 0
 
 
@@ -429,7 +444,13 @@ async def outgoing_end_call(
     )
     try:
         provider = str(call.provider or "telnyx").strip().lower() or "telnyx"
-        if provider == "telnyx" and call.telnyx_call_control_id:
+        if provider == "telnyx" and (call.extra_json or {}).get("livekit_first"):
+            await cleanup_outgoing_room(
+                room_name=call.livekit_room_name,
+                participant_identity=str((call.extra_json or {}).get("livekit_participant_identity") or ""),
+                dispatch_id=str((call.extra_json or {}).get("livekit_dispatch_id") or ""),
+            )
+        elif provider == "telnyx" and call.telnyx_call_control_id:
             await hangup_call(
                 call.telnyx_call_control_id,
                 {
@@ -465,6 +486,77 @@ async def outgoing_end_call(
         payload=payload.model_dump(),
         call=call,
         room_name=call.livekit_room_name,
+    )
+    return {"ok": True, "call_id": call.id}
+
+
+@router.post("/outgoing/calls/livekit-status")
+async def outgoing_livekit_status(
+    payload: OutgoingLiveKitStatusRequest,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+    _: None = Depends(_require_internal_api_key),
+):
+    tenant = None
+    if payload.tenant_id:
+        tenant = get_tenant_by_id(db, payload.tenant_id)
+    if tenant is None and payload.tenant_slug:
+        tenant = get_tenant_by_slug(db, payload.tenant_slug)
+    call = get_outgoing_call(
+        outgoing_db,
+        outgoing_call_id=payload.outgoing_call_id,
+        provider_call_sid=payload.provider_call_sid,
+        tenant_id=tenant.id if tenant else "",
+    )
+    if call is None:
+        raise HTTPException(status_code=404, detail="Outgoing call not found")
+
+    now = datetime.now(timezone.utc)
+    if payload.room_name:
+        call.livekit_room_name = payload.room_name
+    if payload.provider_call_sid:
+        call.provider_call_sid = payload.provider_call_sid
+
+    extra_updates = {
+        "livekit_first": True,
+        "livekit_participant_identity": payload.participant_identity,
+        "livekit_status": payload.status,
+        "livekit_status_updated_at": _format_timestamp(payload.timestamp) or now.isoformat(),
+        "livekit_sip_status_code": payload.sip_status_code,
+        "livekit_sip_status": payload.sip_status,
+        "livekit_error": payload.error,
+    }
+
+    status = str(payload.status or "").strip().lower()
+    if status == "bridged":
+        mark_outgoing_call_status(
+            outgoing_db,
+            call,
+            "bridged",
+            started_at=call.started_at or now,
+            answered_at=call.answered_at or now,
+            bridged_at=call.bridged_at or now,
+            livekit_room_name=payload.room_name or call.livekit_room_name,
+            provider_call_sid=payload.provider_call_sid or call.provider_call_sid,
+        )
+    elif status == "failed":
+        error_message = str(payload.error or "").strip()
+        sip_code = str(payload.sip_status_code or "").strip()
+        sip_status = str(payload.sip_status or "").strip()
+        detail = " | ".join(part for part in [error_message, f"SIP {sip_code}" if sip_code else "", sip_status] if part)
+        mark_outgoing_call_error(outgoing_db, call, detail or "LiveKit outbound call failed before answer")
+    elif status:
+        mark_outgoing_call_status(outgoing_db, call, status, livekit_room_name=payload.room_name or call.livekit_room_name)
+
+    update_outgoing_call_extra(outgoing_db, call, extra_updates)
+    log_outgoing_event(
+        outgoing_db,
+        tenant_id=call.tenant_id,
+        tenant_slug=call.tenant_slug,
+        event_type="livekit_status",
+        payload=payload.model_dump(),
+        call=call,
+        room_name=payload.room_name or call.livekit_room_name,
     )
     return {"ok": True, "call_id": call.id}
 
@@ -524,6 +616,20 @@ async def outgoing_agent_session_config(
         tenant = get_tenant_by_id(db, call.tenant_id)
     if tenant is None:
         raise HTTPException(status_code=404, detail="Unable to resolve tenant for outgoing call")
+    if call is not None and payload.room_name:
+        now = datetime.now(timezone.utc)
+        if not call.livekit_room_name:
+            call.livekit_room_name = payload.room_name
+        if call.status in {"queued", "dialing", "initiated", "livekit_dispatch_requested"}:
+            mark_outgoing_call_status(
+                outgoing_db,
+                call,
+                "bridged",
+                started_at=call.started_at or now,
+                answered_at=call.answered_at or now,
+                bridged_at=call.bridged_at or now,
+                livekit_room_name=payload.room_name,
+            )
 
     runtime = build_outgoing_runtime(
         db,
@@ -565,6 +671,16 @@ async def outgoing_transcript_event(
         transcript_text=payload.transcript,
         transcript_payload=payload.model_dump(),
     )
+    if payload.room_name and not call.livekit_room_name:
+        call.livekit_room_name = payload.room_name
+    if call.status not in {"failed", "machine_detected", "completed"}:
+        mark_outgoing_call_status(
+            outgoing_db,
+            call,
+            "completed",
+            ended_at=call.ended_at or datetime.now(timezone.utc),
+            livekit_room_name=payload.room_name or call.livekit_room_name,
+        )
     log_outgoing_event(
         outgoing_db,
         tenant_id=call.tenant_id,

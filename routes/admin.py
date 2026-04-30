@@ -1,7 +1,7 @@
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +15,17 @@ from app_config import (
     AGENT_DEBUG_LOG_PATH,
     AGENT_LOG_PATH,
     DEBUG_LOG_MAX_CHARS,
+    LIVEKIT_API_KEY,
+    LIVEKIT_API_SECRET,
     LIVEKIT_OUTGOING_SIP_PASSWORD,
+    LIVEKIT_OUTGOING_AGENT_NAME,
     LIVEKIT_OUTGOING_SIP_URI,
     LIVEKIT_OUTGOING_SIP_USERNAME,
+    LIVEKIT_TELNYX_OUTBOUND_HOST,
+    LIVEKIT_TELNYX_OUTBOUND_PASSWORD,
+    LIVEKIT_TELNYX_OUTBOUND_TRUNK_ID,
+    LIVEKIT_TELNYX_OUTBOUND_USERNAME,
+    LIVEKIT_URL,
     OUTGOING_AGENT_DEBUG_LOG_PATH,
     OUTGOING_AGENT_LOG_PATH,
     PUBLIC_BASE_URL,
@@ -32,6 +40,7 @@ from outgoing_db import get_outgoing_db
 from models import AdminUser, CallEvent, Tenant, TenantPhoneNumber
 from security import decrypt_json, mask_secret, verify_password
 from services.cartesia import get_cartesia_voice_options
+from services.livekit_voice import create_agent_dispatch, ensure_telnyx_outbound_trunk
 from services.outgoing import (
     clear_outgoing_events,
     create_outgoing_call,
@@ -87,6 +96,10 @@ OUTGOING_PROVIDER_CHOICES = (
     {"value": "telnyx", "label": "Telnyx"},
     {"value": "twilio", "label": "Twilio"},
 )
+
+
+def _outgoing_room_name(call_id: str) -> str:
+    return f"outgoing-call-{call_id}"
 
 
 def _read_log_tail(path_value: str, max_chars: int = DEBUG_LOG_MAX_CHARS) -> dict[str, Any]:
@@ -726,6 +739,7 @@ async def launch_outgoing_call(
     notes = str(form.get("notes") or "").strip()
     selected_from_number = normalize_phone_number(str(form.get("from_number") or ""))
     provider = str(profile.provider or "telnyx").strip().lower() or "telnyx"
+    handoff_mode = (TELNYX_OUTGOING_HANDOFF_MODE or "direct").strip().lower()
     provider_numbers = {
         item.phone_number
         for item in list_outgoing_numbers(outgoing_db, tenant.id)
@@ -733,7 +747,14 @@ async def launch_outgoing_call(
     }
     default_number = get_default_outgoing_number(outgoing_db, tenant.id, provider)
     from_number = selected_from_number or (default_number.phone_number if default_number else "")
-    if not (LIVEKIT_OUTGOING_SIP_URI and LIVEKIT_OUTGOING_SIP_USERNAME and LIVEKIT_OUTGOING_SIP_PASSWORD):
+    if provider == "telnyx" and handoff_mode == "livekit_first":
+        if not (LIVEKIT_URL and LIVEKIT_API_KEY and LIVEKIT_API_SECRET):
+            _flash(request, "error", "LiveKit management API credentials are missing on the backend server")
+            return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+        if not (LIVEKIT_TELNYX_OUTBOUND_TRUNK_ID or (LIVEKIT_TELNYX_OUTBOUND_HOST and LIVEKIT_TELNYX_OUTBOUND_USERNAME and LIVEKIT_TELNYX_OUTBOUND_PASSWORD)):
+            _flash(request, "error", "LiveKit Telnyx outbound trunk settings are missing on the backend server")
+            return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+    elif not (LIVEKIT_OUTGOING_SIP_URI and LIVEKIT_OUTGOING_SIP_USERNAME and LIVEKIT_OUTGOING_SIP_PASSWORD):
         _flash(request, "error", "The outgoing LiveKit SIP target is not configured on the backend server yet")
         return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
     if not target_number:
@@ -749,11 +770,13 @@ async def launch_outgoing_call(
         _flash(request, "error", "Set the tenant's outgoing status to active before launching calls")
         return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
     if provider == "telnyx" and not TELNYX_API_KEY:
-        _flash(request, "error", "TELNYX_API_KEY is missing on the backend server")
-        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+        if handoff_mode != "livekit_first":
+            _flash(request, "error", "TELNYX_API_KEY is missing on the backend server")
+            return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
     if provider == "telnyx" and not profile.telnyx_connection_id:
-        _flash(request, "error", "Save the tenant's Telnyx Voice API application ID first")
-        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+        if handoff_mode != "livekit_first":
+            _flash(request, "error", "Save the tenant's Telnyx Voice API application ID first")
+            return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
     if provider == "twilio" and not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN):
         _flash(request, "error", "TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is missing on the backend server")
         return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
@@ -771,7 +794,7 @@ async def launch_outgoing_call(
     call.extra_json = {
         **(call.extra_json or {}),
         "provider": provider,
-        "handoff_mode": (TELNYX_OUTGOING_HANDOFF_MODE or "direct").strip().lower(),
+        "handoff_mode": handoff_mode,
         "amd_mode": TELNYX_OUTGOING_AMD_MODE,
         "launch_notes": notes,
     }
@@ -779,37 +802,76 @@ async def launch_outgoing_call(
 
     try:
         if provider == "telnyx":
-            client_state = encode_client_state(
-                {
+            if handoff_mode == "livekit_first":
+                trunk = await ensure_telnyx_outbound_trunk()
+                room_name = _outgoing_room_name(call.id)
+                participant_identity = f"callee-{call.id}"
+                dispatch_metadata = {
+                    "mode": "livekit_first",
                     "provider": "telnyx",
-                    "mode": "outgoing",
                     "tenant_id": tenant.id,
                     "tenant_slug": tenant.slug,
                     "outgoing_call_id": call.id,
-                    "target_number": target_number,
+                    "phone_number": target_number,
                     "from_number": from_number,
+                    "participant_identity": participant_identity,
+                    "participant_name": target_name or target_number,
+                    "caller_display_name": profile.caller_display_name or tenant.display_name,
+                    "sip_trunk_id": trunk["sip_trunk_id"],
                 }
-            )
-            dial_payload = {
-                "connection_id": profile.telnyx_connection_id,
-                "to": target_number,
-                "from": from_number,
-                "from_display_name": profile.caller_display_name or tenant.display_name,
-                "webhook_url": f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/telnyx/webhook",
-                "webhook_url_method": "POST",
-                "client_state": client_state,
-                "command_id": telnyx_command_id("outgoing-dial", call.id),
-            }
-            if (TELNYX_OUTGOING_HANDOFF_MODE or "direct").strip().lower() == "amd":
-                dial_payload["answering_machine_detection"] = TELNYX_OUTGOING_AMD_MODE
-            result = await telnyx_dial_call(dial_payload)
-            data = result.get("data") or {}
-            call.telnyx_call_control_id = str(data.get("call_control_id") or call.telnyx_call_control_id or "")
-            call.provider_call_sid = call.telnyx_call_control_id or call.provider_call_sid or ""
-            call.telnyx_call_leg_id = str(data.get("call_leg_id") or call.telnyx_call_leg_id or "")
-            call.telnyx_call_session_id = str(data.get("call_session_id") or call.telnyx_call_session_id or "")
-            call.status = "dialing"
-            outgoing_db.flush()
+                dispatch = await create_agent_dispatch(
+                    room_name=room_name,
+                    metadata=dispatch_metadata,
+                    agent_name=LIVEKIT_OUTGOING_AGENT_NAME,
+                )
+                call.livekit_room_name = room_name
+                call.status = "dialing"
+                call.started_at = call.started_at or datetime.now(timezone.utc)
+                call.provider_call_sid = ""
+                call.telnyx_call_control_id = ""
+                call.telnyx_call_leg_id = ""
+                call.telnyx_call_session_id = ""
+                call.extra_json = {
+                    **(call.extra_json or {}),
+                    "livekit_first": True,
+                    "livekit_dispatch_id": dispatch.get("dispatch_id", ""),
+                    "livekit_participant_identity": participant_identity,
+                    "livekit_outbound_trunk_id": trunk["sip_trunk_id"],
+                    "livekit_dispatch_metadata": dispatch_metadata,
+                }
+                outgoing_db.flush()
+            else:
+                client_state = encode_client_state(
+                    {
+                        "provider": "telnyx",
+                        "mode": "outgoing",
+                        "tenant_id": tenant.id,
+                        "tenant_slug": tenant.slug,
+                        "outgoing_call_id": call.id,
+                        "target_number": target_number,
+                        "from_number": from_number,
+                    }
+                )
+                dial_payload = {
+                    "connection_id": profile.telnyx_connection_id,
+                    "to": target_number,
+                    "from": from_number,
+                    "from_display_name": profile.caller_display_name or tenant.display_name,
+                    "webhook_url": f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/telnyx/webhook",
+                    "webhook_url_method": "POST",
+                    "client_state": client_state,
+                    "command_id": telnyx_command_id("outgoing-dial", call.id),
+                }
+                if handoff_mode == "amd":
+                    dial_payload["answering_machine_detection"] = TELNYX_OUTGOING_AMD_MODE
+                result = await telnyx_dial_call(dial_payload)
+                data = result.get("data") or {}
+                call.telnyx_call_control_id = str(data.get("call_control_id") or call.telnyx_call_control_id or "")
+                call.provider_call_sid = call.telnyx_call_control_id or call.provider_call_sid or ""
+                call.telnyx_call_leg_id = str(data.get("call_leg_id") or call.telnyx_call_leg_id or "")
+                call.telnyx_call_session_id = str(data.get("call_session_id") or call.telnyx_call_session_id or "")
+                call.status = "dialing"
+                outgoing_db.flush()
         else:
             twiml_url = f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/twilio/twiml?outgoing_call_id={call.id}"
             status_callback = f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/twilio/status?outgoing_call_id={call.id}"

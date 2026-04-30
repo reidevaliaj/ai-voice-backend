@@ -205,7 +205,7 @@ def _parse_email_targets(raw: str) -> list[str]:
 def _email_targets_from_runtime(runtime: dict[str, Any]) -> list[str]:
     outgoing = runtime.get("outgoing") or {}
     configured = _parse_email_targets(str(outgoing.get("summary_notification_targets") or ""))
-    return configured or ["info@cos-st.com"]
+    return configured or ["info@cod-st.com"]
 
 
 def _send_outgoing_email_summary(
@@ -244,7 +244,7 @@ def _send_outgoing_email_summary(
     """
     sent_to: list[str] = []
     results: list[dict[str, Any]] = []
-    from_email = str(outgoing.get("summary_from_email") or "info@cos-st.com").strip() or "info@cos-st.com"
+    from_email = str(outgoing.get("summary_from_email") or "info@cod-st.com").strip() or "info@cod-st.com"
     reply_to = str(outgoing.get("summary_reply_to_email") or "").strip()
     for target in targets:
         result = send_email_resend(

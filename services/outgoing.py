@@ -19,7 +19,7 @@ from services.tenants import (
 )
 
 SUPPORTED_OUTGOING_PROVIDERS = {"telnyx", "twilio"}
-DEFAULT_OUTGOING_SUMMARY_EMAIL = "info@cos-st.com"
+DEFAULT_OUTGOING_SUMMARY_EMAIL = "info@cod-st.com"
 
 
 def _utcnow() -> datetime:

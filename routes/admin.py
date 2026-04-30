@@ -53,7 +53,14 @@ from services.outgoing import (
     sync_outgoing_call_from_provider,
     upsert_outgoing_number,
 )
-from services.telnyx_voice import dial_call as telnyx_dial_call, encode_client_state, get_call_details, telnyx_command_id
+from services.telnyx_voice import (
+    dial_call as telnyx_dial_call,
+    encode_client_state,
+    ensure_outbound_recording_for_connection,
+    get_call_details,
+    list_call_recordings,
+    telnyx_command_id,
+)
 from services.tenants import (
     build_runtime_context,
     config_form_payload,
@@ -193,6 +200,103 @@ def _latest_debug_session_entries(raw_content: str) -> list[dict[str, Any]]:
     return parsed[session_start_index:]
 
 
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _debug_is_user_stop(entry: dict[str, Any]) -> bool:
+    return (
+        entry["category"] == "TURN"
+        and entry["event"] == "user_state_changed"
+        and str(entry["fields"].get("new_state") or "") == "listening"
+    )
+
+
+def _debug_is_user_committed(entry: dict[str, Any]) -> bool:
+    return entry["category"] == "TRANSCRIPT" and entry["event"] == "USER_COMMITTED"
+
+
+def _debug_is_agent_speaking(entry: dict[str, Any]) -> bool:
+    return (
+        entry["category"] == "AGENT"
+        and entry["event"] == "agent_state_changed"
+        and str(entry["fields"].get("new_state") or "") == "speaking"
+    )
+
+
+def _build_bridge_metrics(timeline: list[dict[str, Any]]) -> dict[str, Any]:
+    bridges: list[dict[str, Any]] = []
+    last_user_committed_index = -1
+
+    for idx, entry in enumerate(timeline):
+        if not _debug_is_user_committed(entry):
+            continue
+
+        speech_end = None
+        for back_idx in range(idx - 1, last_user_committed_index, -1):
+            candidate = timeline[back_idx]
+            if _debug_is_user_stop(candidate):
+                speech_end = candidate
+                break
+
+        agent_speaking = None
+        for forward_idx in range(idx + 1, len(timeline)):
+            candidate = timeline[forward_idx]
+            if _debug_is_agent_speaking(candidate):
+                agent_speaking = candidate
+                break
+            if _debug_is_user_committed(candidate):
+                break
+
+        last_user_committed_index = idx
+        if speech_end is None or agent_speaking is None:
+            continue
+
+        user_text = str(entry["fields"].get("text") or "").strip()
+        speech_end_to_committed_sec = round(entry["elapsed_sec"] - speech_end["elapsed_sec"], 3)
+        committed_to_speaking_sec = round(agent_speaking["elapsed_sec"] - entry["elapsed_sec"], 3)
+        full_bridge_sec = round(agent_speaking["elapsed_sec"] - speech_end["elapsed_sec"], 3)
+        bridges.append(
+            {
+                "turn_number": len(bridges) + 1,
+                "user_text": user_text,
+                "speech_end_elapsed_sec": speech_end["elapsed_sec"],
+                "user_committed_elapsed_sec": entry["elapsed_sec"],
+                "agent_speaking_elapsed_sec": agent_speaking["elapsed_sec"],
+                "speech_end_to_committed_sec": speech_end_to_committed_sec,
+                "committed_to_speaking_sec": committed_to_speaking_sec,
+                "full_bridge_sec": full_bridge_sec,
+            }
+        )
+
+    if not bridges:
+        return {"bridges": [], "summary": {}}
+
+    settle = [item["speech_end_to_committed_sec"] for item in bridges]
+    respond = [item["committed_to_speaking_sec"] for item in bridges]
+    full = [item["full_bridge_sec"] for item in bridges]
+    summary = {
+        "bridge_count": len(bridges),
+        "average_speech_end_to_committed_sec": round(sum(settle) / len(settle), 3),
+        "average_committed_to_speaking_sec": round(sum(respond) / len(respond), 3),
+        "average_full_bridge_sec": round(sum(full) / len(full), 3),
+        "max_full_bridge_sec": round(max(full), 3),
+        "min_full_bridge_sec": round(min(full), 3),
+    }
+    return {"bridges": bridges, "summary": summary}
+
+
 def _build_debug_timeline(path_value: str, max_chars: int = DEBUG_LOG_MAX_CHARS) -> dict[str, Any]:
     raw_log = _read_log_tail(path_value, max_chars=max_chars)
     entries = _latest_debug_session_entries(raw_log.get("content", ""))
@@ -233,6 +337,7 @@ def _build_debug_timeline(path_value: str, max_chars: int = DEBUG_LOG_MAX_CHARS)
             return item["elapsed_sec"]
         return None
 
+    bridge_metrics = _build_bridge_metrics(timeline)
     summary = {
         "events_count": len(timeline),
         "session_duration_sec": timeline[-1]["elapsed_sec"],
@@ -243,10 +348,11 @@ def _build_debug_timeline(path_value: str, max_chars: int = DEBUG_LOG_MAX_CHARS)
         "first_tool_executed_sec": _first_elapsed("TOOL", "TOOL_EXECUTED"),
         "shutdown_started_sec": _first_elapsed("CALL", "shutdown_started"),
         "shutdown_finished_sec": _first_elapsed("CALL", "shutdown_finished"),
+        **bridge_metrics["summary"],
     }
 
     raw_log["content"] = "\n".join(item["raw_line"] for item in timeline)
-    return {"log": raw_log, "entries": timeline, "summary": summary}
+    return {"log": raw_log, "entries": timeline, "summary": summary, "bridges": bridge_metrics["bridges"]}
 
 
 def _truncate_log(path_value: str) -> dict[str, Any]:
@@ -322,6 +428,118 @@ async def _sync_recent_outgoing_calls_with_telnyx(outgoing_db: Session, calls: l
     if elapsed > 1.0:
         logger.warning("[OUTGOING_SYNC] synced_recent_calls count=%s elapsed=%.3fs", len(calls), elapsed)
     return synced
+
+
+def _call_recording_urls(call: Any) -> dict[str, str]:
+    extra = dict(getattr(call, "extra_json", {}) or {})
+    recording_urls = extra.get("public_recording_urls") or extra.get("recording_urls") or {}
+    return recording_urls if isinstance(recording_urls, dict) else {}
+
+
+def _call_needs_telnyx_recording_lookup(call: Any) -> bool:
+    if getattr(call, "provider", "") != "telnyx":
+        return False
+    extra = dict(getattr(call, "extra_json", {}) or {})
+    if not extra.get("livekit_first"):
+        return False
+    if not extra.get("recording_expected"):
+        return False
+    if _call_recording_urls(call):
+        return False
+    return getattr(call, "status", "") in {"completed", "failed"}
+
+
+def _recording_match_score(call: Any, recording: dict[str, Any]) -> float | None:
+    call_from = normalize_phone_number(str(getattr(call, "from_number", "") or ""))
+    call_to = normalize_phone_number(str(getattr(call, "target_number", "") or ""))
+    if call_from and call_from != normalize_phone_number(str(recording.get("from") or "")):
+        return None
+    if call_to and call_to != normalize_phone_number(str(recording.get("to") or "")):
+        return None
+
+    expected_connection_id = str((getattr(call, "extra_json", {}) or {}).get("telnyx_credential_connection_id") or "").strip()
+    recording_connection_id = str(recording.get("connection_id") or "").strip()
+    if expected_connection_id and recording_connection_id and expected_connection_id != recording_connection_id:
+        return None
+
+    call_time = (
+        getattr(call, "ended_at", None)
+        or getattr(call, "answered_at", None)
+        or getattr(call, "started_at", None)
+        or getattr(call, "created_at", None)
+    )
+    recording_time = (
+        _parse_iso_datetime(recording.get("recording_ended_at"))
+        or _parse_iso_datetime(recording.get("recording_started_at"))
+        or _parse_iso_datetime(recording.get("created_at"))
+        or _parse_iso_datetime(recording.get("updated_at"))
+    )
+    if call_time is None or recording_time is None:
+        return 0.0
+    return abs((recording_time - call_time).total_seconds())
+
+
+async def _enrich_recent_outgoing_calls_with_recordings(outgoing_db: Session, calls: list[Any]) -> list[Any]:
+    candidates = [call for call in calls if _call_needs_telnyx_recording_lookup(call)]
+    if not candidates or not TELNYX_API_KEY:
+        return calls
+
+    try:
+        recordings = await list_call_recordings(page_size=max(25, min(100, len(candidates) * 10)))
+    except Exception as exc:
+        logger.warning("[OUTGOING_RECORDINGS] lookup failed count=%s error=%s", len(candidates), exc)
+        return calls
+
+    used_recording_ids: set[str] = set()
+    lookup_timestamp = datetime.now(timezone.utc).isoformat()
+    for call in candidates:
+        best_recording = None
+        best_score = None
+        for recording in recordings:
+            recording_id = str(recording.get("id") or "").strip()
+            if not recording_id or recording_id in used_recording_ids:
+                continue
+            download_urls = recording.get("download_urls") if isinstance(recording.get("download_urls"), dict) else {}
+            if not download_urls:
+                continue
+            score = _recording_match_score(call, recording)
+            if score is None or score > 7200:
+                continue
+            if best_score is None or score < best_score:
+                best_recording = recording
+                best_score = score
+
+        if best_recording is None:
+            update_outgoing_call_extra(
+                outgoing_db,
+                call,
+                {
+                    "recording_last_lookup_at": lookup_timestamp,
+                    "recording_sync_pending": True,
+                },
+            )
+            continue
+
+        used_recording_ids.add(str(best_recording.get("id") or ""))
+        download_urls = best_recording.get("download_urls") if isinstance(best_recording.get("download_urls"), dict) else {}
+        update_outgoing_call_extra(
+            outgoing_db,
+            call,
+            {
+                "recording_last_lookup_at": lookup_timestamp,
+                "recording_sync_pending": False,
+                "recording_sync_source": "telnyx_recordings_api",
+                "recording_id": str(best_recording.get("id") or ""),
+                "recording_urls": download_urls,
+                "public_recording_urls": download_urls,
+                "recording_saved_at": str(best_recording.get("updated_at") or best_recording.get("created_at") or ""),
+                "recording_started_at": str(best_recording.get("recording_started_at") or ""),
+                "recording_ended_at": str(best_recording.get("recording_ended_at") or ""),
+                "recording_duration_millis": best_recording.get("duration_millis"),
+                "recording_status": str(best_recording.get("status") or ""),
+            },
+        )
+    return calls
 
 
 def _latest_email_events(limit: int = 10, tenant_id: str | None = None) -> list[dict[str, Any]]:
@@ -571,6 +789,7 @@ async def tenant_outgoing_detail(
     except Exception as exc:
         voice_error = str(exc)
     recent_calls = list_recent_outgoing_calls(outgoing_db, tenant.id)
+    recent_calls = await _enrich_recent_outgoing_calls_with_recordings(outgoing_db, recent_calls)
     outgoing_debug_timeline = _build_debug_timeline(OUTGOING_AGENT_DEBUG_LOG_PATH)
     return templates.TemplateResponse(
         request,
@@ -684,6 +903,7 @@ async def sync_outgoing_calls_action(
         raise HTTPException(status_code=404, detail="Tenant not found")
     recent_calls = list_recent_outgoing_calls(outgoing_db, tenant.id)
     synced_calls = await _sync_recent_outgoing_calls_with_telnyx(outgoing_db, recent_calls)
+    synced_calls = await _enrich_recent_outgoing_calls_with_recordings(outgoing_db, synced_calls)
     active_count = sum(1 for call in synced_calls if getattr(call, "status", "") in OUTGOING_ACTIVE_STATUSES)
     _flash(request, "success", f"Provider sync completed for {len(synced_calls)} call(s). Active after sync: {active_count}.")
     return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
@@ -806,6 +1026,18 @@ async def launch_outgoing_call(
                 trunk = await ensure_telnyx_outbound_trunk()
                 room_name = _outgoing_room_name(call.id)
                 participant_identity = f"callee-{call.id}"
+                recording_state: dict[str, Any] = {}
+                try:
+                    recording_state = await ensure_outbound_recording_for_connection(
+                        sip_username=LIVEKIT_TELNYX_OUTBOUND_USERNAME,
+                        caller_number=from_number,
+                    )
+                except Exception as exc:
+                    logger.warning("[OUTGOING_RECORDINGS] could not enable Telnyx trunk recording call_id=%s error=%s", call.id, exc)
+                    recording_state = {
+                        "recording_enabled": False,
+                        "recording_error": str(exc),
+                    }
                 dispatch_metadata = {
                     "mode": "livekit_first",
                     "provider": "telnyx",
@@ -838,6 +1070,13 @@ async def launch_outgoing_call(
                     "livekit_participant_identity": participant_identity,
                     "livekit_outbound_trunk_id": trunk["sip_trunk_id"],
                     "livekit_dispatch_metadata": dispatch_metadata,
+                    "telnyx_credential_connection_id": recording_state.get("connection_id", ""),
+                    "telnyx_outbound_voice_profile_id": recording_state.get("outbound_voice_profile_id", ""),
+                    "recording_expected": bool(recording_state.get("recording_enabled")),
+                    "recording_provider": "telnyx_outbound_voice_profile",
+                    "recording_provider_updated": bool(recording_state.get("updated")),
+                    "recording_provider_settings": recording_state.get("call_recording", {}),
+                    "recording_enable_error": str(recording_state.get("recording_error") or ""),
                 }
                 outgoing_db.flush()
             else:

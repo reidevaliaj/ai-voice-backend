@@ -272,6 +272,7 @@
         </td>
         <td>
           {% set recording_urls = (call.extra_json or {}).get("public_recording_urls") or (call.extra_json or {}).get("recording_urls") or {} %}
+          {% set recording_expected = (call.extra_json or {}).get("recording_expected") %}
           {% if call.provider == "twilio" %}
           <span class="muted">n/a</span>
           {% elif handoff_mode == "direct" %}
@@ -280,6 +281,8 @@
           <a href="{{ recording_urls.get('mp3') }}" target="_blank" rel="noreferrer">mp3</a>
           {% elif recording_urls.get("wav") %}
           <a href="{{ recording_urls.get('wav') }}" target="_blank" rel="noreferrer">wav</a>
+          {% elif recording_expected %}
+          <span class="muted">pending</span>
           {% elif (call.extra_json or {}).get("provider_is_alive") is sameas false %}
           <span class="muted">not available</span>
           {% elif call.status in ["machine_detected", "completed", "failed"] %}
@@ -314,9 +317,39 @@
       <div>First user speaking: <code>{{ outgoing_agent_debug_timeline.summary.first_user_speaking_sec if outgoing_agent_debug_timeline.summary.first_user_speaking_sec is not none else '-' }}</code>s</div>
       <div>First user committed: <code>{{ outgoing_agent_debug_timeline.summary.first_user_committed_sec if outgoing_agent_debug_timeline.summary.first_user_committed_sec is not none else '-' }}</code>s</div>
       <div>First tool executed: <code>{{ outgoing_agent_debug_timeline.summary.first_tool_executed_sec if outgoing_agent_debug_timeline.summary.first_tool_executed_sec is not none else '-' }}</code>s</div>
+      <div>Bridges detected: <code>{{ outgoing_agent_debug_timeline.summary.bridge_count if outgoing_agent_debug_timeline.summary.bridge_count is not none else '-' }}</code></div>
+      <div>Average full bridge: <code>{{ outgoing_agent_debug_timeline.summary.average_full_bridge_sec if outgoing_agent_debug_timeline.summary.average_full_bridge_sec is not none else '-' }}</code>s</div>
+      <div>Average stop -> commit: <code>{{ outgoing_agent_debug_timeline.summary.average_speech_end_to_committed_sec if outgoing_agent_debug_timeline.summary.average_speech_end_to_committed_sec is not none else '-' }}</code>s</div>
+      <div>Average commit -> AI speaking: <code>{{ outgoing_agent_debug_timeline.summary.average_committed_to_speaking_sec if outgoing_agent_debug_timeline.summary.average_committed_to_speaking_sec is not none else '-' }}</code>s</div>
     {% else %}
       <div>No parsed timing session yet.</div>
     {% endif %}
+  </div>
+  <div style="overflow-x: auto; margin-bottom: 14px;">
+    <table id="outgoing-bridge-table">
+      <thead>
+        <tr>
+          <th>Turn</th>
+          <th>User Text</th>
+          <th>Stop -> Commit (s)</th>
+          <th>Commit -> AI Speaking (s)</th>
+          <th>Full Bridge (s)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for bridge in outgoing_agent_debug_timeline.bridges %}
+        <tr>
+          <td><code>{{ bridge.turn_number }}</code></td>
+          <td>{{ bridge.user_text or "-" }}</td>
+          <td><code>{{ bridge.speech_end_to_committed_sec }}</code></td>
+          <td><code>{{ bridge.committed_to_speaking_sec }}</code></td>
+          <td><code>{{ bridge.full_bridge_sec }}</code></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">No bridges detected yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
   </div>
   <div style="overflow-x: auto;">
     <table id="outgoing-debug-timeline-table">
@@ -362,6 +395,7 @@
     const debugLog = document.getElementById("outgoing-debug-log");
     const debugPath = document.getElementById("outgoing-debug-path");
     const debugSummary = document.getElementById("outgoing-debug-summary");
+    const bridgeTableBody = document.querySelector("#outgoing-bridge-table tbody");
     const timelineTableBody = document.querySelector("#outgoing-debug-timeline-table tbody");
     const languageSelect = document.querySelector('select[name="assistant_language"]');
     const sttSelect = document.querySelector('select[name="stt_language"]');
@@ -396,7 +430,31 @@
         <div>First user speaking: <code>${escapeHtml(value(summary.first_user_speaking_sec))}</code>s</div>
         <div>First user committed: <code>${escapeHtml(value(summary.first_user_committed_sec))}</code>s</div>
         <div>First tool executed: <code>${escapeHtml(value(summary.first_tool_executed_sec))}</code>s</div>
+        <div>Bridges detected: <code>${escapeHtml(value(summary.bridge_count))}</code></div>
+        <div>Average full bridge: <code>${escapeHtml(value(summary.average_full_bridge_sec))}</code>s</div>
+        <div>Average stop -> commit: <code>${escapeHtml(value(summary.average_speech_end_to_committed_sec))}</code>s</div>
+        <div>Average commit -> AI speaking: <code>${escapeHtml(value(summary.average_committed_to_speaking_sec))}</code>s</div>
       `;
+    }
+
+    function renderBridges(bridges) {
+      if (!bridgeTableBody) {
+        return;
+      }
+      const rows = Array.isArray(bridges) ? bridges : [];
+      if (!rows.length) {
+        bridgeTableBody.innerHTML = '<tr><td colspan="5" class="muted">No bridges detected yet.</td></tr>';
+        return;
+      }
+      bridgeTableBody.innerHTML = rows.map((bridge) => `
+        <tr>
+          <td><code>${escapeHtml(bridge.turn_number)}</code></td>
+          <td>${escapeHtml(bridge.user_text || "-")}</td>
+          <td><code>${escapeHtml(bridge.speech_end_to_committed_sec)}</code></td>
+          <td><code>${escapeHtml(bridge.committed_to_speaking_sec)}</code></td>
+          <td><code>${escapeHtml(bridge.full_bridge_sec)}</code></td>
+        </tr>
+      `).join("");
     }
 
     function renderTimeline(entries) {
@@ -436,6 +494,7 @@
         }
         if (payload.outgoing_agent_debug_timeline) {
           renderDebugSummary(payload.outgoing_agent_debug_timeline.summary);
+          renderBridges(payload.outgoing_agent_debug_timeline.bridges);
           renderTimeline(payload.outgoing_agent_debug_timeline.entries);
         }
       } catch (error) {

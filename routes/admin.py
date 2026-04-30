@@ -42,6 +42,7 @@ from security import decrypt_json, mask_secret, verify_password
 from services.cartesia import get_cartesia_voice_options
 from services.livekit_voice import cleanup_outgoing_room, create_agent_dispatch, ensure_telnyx_outbound_trunk
 from services.outgoing import (
+    build_outgoing_prompt_tags,
     clear_outgoing_events,
     create_outgoing_call,
     delete_outgoing_prompt_tool,
@@ -52,6 +53,8 @@ from services.outgoing import (
     list_outgoing_numbers,
     list_recent_outgoing_calls,
     outgoing_profile_form_payload,
+    parse_outgoing_prompt_tags,
+    render_outgoing_template,
     save_outgoing_profile,
     save_outgoing_prompt_tool,
     sync_outgoing_call_from_provider,
@@ -1096,6 +1099,10 @@ async def launch_outgoing_call(
     target_number = normalize_phone_number(str(form.get("target_number") or ""))
     target_name = str(form.get("target_name") or "").strip()
     notes = str(form.get("notes") or "").strip()
+    tag_website = str(form.get("tag_website") or "").strip()
+    tag_reason = str(form.get("tag_reason") or "").strip()
+    tag_specific = str(form.get("tag_specific") or "").strip()
+    extra_tags_raw = str(form.get("extra_tags") or "").strip()
     selected_from_number = normalize_phone_number(str(form.get("from_number") or ""))
     provider = str(profile.provider or "telnyx").strip().lower() or "telnyx"
     handoff_mode = (TELNYX_OUTGOING_HANDOFF_MODE or "direct").strip().lower()
@@ -1150,12 +1157,29 @@ async def launch_outgoing_call(
         notes=notes,
         tenant_config_version=active_config.version if active_config else 1,
     )
+    prompt_tags = build_outgoing_prompt_tags(
+        tenant_display_name=tenant.display_name,
+        caller_display_name=profile.caller_display_name or tenant.display_name,
+        target_name=target_name,
+        target_number=target_number,
+        from_number=from_number,
+        notes=notes,
+        website=tag_website,
+        reason=tag_reason,
+        specific=tag_specific,
+        extra_tags=parse_outgoing_prompt_tags(extra_tags_raw),
+    )
+    call.opening_phrase = render_outgoing_template(profile.opening_phrase, prompt_tags) or profile.opening_phrase
     call.extra_json = {
         **(call.extra_json or {}),
         "provider": provider,
         "handoff_mode": handoff_mode,
         "amd_mode": TELNYX_OUTGOING_AMD_MODE,
         "launch_notes": notes,
+        "prompt_tags": prompt_tags,
+        "extra_tags_raw": extra_tags_raw,
+        "rendered_system_prompt": render_outgoing_template(profile.system_prompt, prompt_tags),
+        "rendered_profile_notes": render_outgoing_template(profile.notes, prompt_tags),
     }
     outgoing_db.flush()
 

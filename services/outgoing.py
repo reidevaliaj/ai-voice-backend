@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,6 +21,7 @@ from services.tenants import (
 
 SUPPORTED_OUTGOING_PROVIDERS = {"telnyx", "twilio"}
 DEFAULT_OUTGOING_SUMMARY_EMAIL = "info@cod-st.com"
+OUTGOING_TEMPLATE_TAG_PATTERN = re.compile(r"\[([A-Za-z0-9_\- ]+)\]")
 
 
 def _utcnow() -> datetime:
@@ -44,6 +46,82 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
 def _normalize_outgoing_provider(value: Any) -> str:
     candidate = str(value or "telnyx").strip().lower()
     return candidate if candidate in SUPPORTED_OUTGOING_PROVIDERS else "telnyx"
+
+
+def normalize_outgoing_template_tag_key(value: Any) -> str:
+    candidate = " ".join(str(value or "").strip().lower().split())
+    return candidate.replace(" ", "_")
+
+
+def parse_outgoing_prompt_tags(raw: Any) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for line in str(raw or "").splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        separator = "=" if "=" in text else ":" if ":" in text else ""
+        if not separator:
+            continue
+        key, value = text.split(separator, 1)
+        normalized_key = normalize_outgoing_template_tag_key(key)
+        if not normalized_key:
+            continue
+        parsed[normalized_key] = str(value or "").strip()
+    return parsed
+
+
+def build_outgoing_prompt_tags(
+    *,
+    tenant_display_name: str = "",
+    caller_display_name: str = "",
+    target_name: str = "",
+    target_number: str = "",
+    from_number: str = "",
+    notes: str = "",
+    website: str = "",
+    reason: str = "",
+    specific: str = "",
+    extra_tags: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    tags: dict[str, str] = {
+        "business": str(tenant_display_name or "").strip(),
+        "tenant": str(tenant_display_name or "").strip(),
+        "caller_display_name": str(caller_display_name or "").strip(),
+        "name": str(target_name or "").strip(),
+        "target_name": str(target_name or "").strip(),
+        "phone": str(target_number or "").strip(),
+        "target_number": str(target_number or "").strip(),
+        "from_number": str(from_number or "").strip(),
+        "notes": str(notes or "").strip(),
+        "website": str(website or "").strip(),
+        "reason": str(reason or "").strip(),
+        "specific": str(specific or "").strip(),
+    }
+    for key, value in dict(extra_tags or {}).items():
+        normalized_key = normalize_outgoing_template_tag_key(key)
+        if not normalized_key:
+            continue
+        tags[normalized_key] = str(value or "").strip()
+    return tags
+
+
+def render_outgoing_template(template: Any, tags: dict[str, Any] | None) -> str:
+    text = str(template or "")
+    if not text:
+        return ""
+    normalized_tags = {
+        normalize_outgoing_template_tag_key(key): str(value or "").strip()
+        for key, value in dict(tags or {}).items()
+        if normalize_outgoing_template_tag_key(key)
+    }
+
+    def _replace(match: re.Match[str]) -> str:
+        placeholder = normalize_outgoing_template_tag_key(match.group(1))
+        if placeholder not in normalized_tags:
+            return match.group(0)
+        return normalized_tags.get(placeholder, "")
+
+    return OUTGOING_TEMPLATE_TAG_PATTERN.sub(_replace, text)
 
 
 def default_outgoing_opening_phrase(display_name: str, assistant_language: str = "en") -> str:
@@ -724,6 +802,17 @@ def build_outgoing_runtime(
     runtime = build_runtime_context(primary_session, tenant, config_version=config_version)
     profile = ensure_outgoing_profile(outgoing_session, tenant, active_config=active_config)
     prompt_tools = list_outgoing_prompt_tools(outgoing_session, tenant.id)
+    call_extra = dict(call.extra_json or {}) if call is not None else {}
+    call_prompt_tags = call_extra.get("prompt_tags") if isinstance(call_extra.get("prompt_tags"), dict) else {}
+    if not call_prompt_tags and call is not None:
+        call_prompt_tags = build_outgoing_prompt_tags(
+            tenant_display_name=tenant.display_name,
+            caller_display_name=profile.caller_display_name or tenant.display_name,
+            target_name=call.target_name,
+            target_number=call.target_number,
+            from_number=call.from_number,
+            notes=call.notes,
+        )
     effective_config = dict(runtime["config"])
     profile_min_endpointing_delay, profile_max_endpointing_delay = normalize_endpointing_window(
         profile.min_endpointing_delay,
@@ -757,9 +846,14 @@ def build_outgoing_runtime(
             "min_endpointing_delay": profile_min_endpointing_delay,
             "max_endpointing_delay": profile_max_endpointing_delay,
             "opening_phrase": (call.opening_phrase if call else profile.opening_phrase) or default_outgoing_opening_phrase(tenant.display_name, profile.assistant_language or effective_config.get("assistant_language") or "en"),
-            "system_prompt": profile.system_prompt or default_outgoing_prompt(tenant.display_name, profile.assistant_language or effective_config.get("assistant_language") or "en"),
+            "system_prompt": str(call_extra.get("rendered_system_prompt") or "").strip()
+            or render_outgoing_template(
+                profile.system_prompt or default_outgoing_prompt(tenant.display_name, profile.assistant_language or effective_config.get("assistant_language") or "en"),
+                call_prompt_tags,
+            ),
             "caller_display_name": profile.caller_display_name or tenant.display_name,
-            "notes": profile.notes,
+            "notes": str(call_extra.get("rendered_profile_notes") or "").strip()
+            or render_outgoing_template(profile.notes, call_prompt_tags),
             "summary_notification_targets": profile.summary_notification_targets or DEFAULT_OUTGOING_SUMMARY_EMAIL,
             "summary_from_email": profile.summary_from_email or DEFAULT_OUTGOING_SUMMARY_EMAIL,
             "summary_reply_to_email": profile.summary_reply_to_email or "",
@@ -767,12 +861,13 @@ def build_outgoing_runtime(
                 {
                     "id": item.id,
                     "name": item.name,
-                    "content": item.content,
+                    "content": render_outgoing_template(item.content, call_prompt_tags),
                     "status": item.status,
                 }
                 for item in prompt_tools
                 if str(item.status or "active").strip().lower() == "active"
             ],
+            "prompt_tags": call_prompt_tags,
         },
         "call": {
             "id": call.id if call else "",
@@ -783,6 +878,7 @@ def build_outgoing_runtime(
             "target_name": call.target_name if call else "",
             "from_number": call.from_number if call else "",
             "notes": call.notes if call else "",
+            "prompt_tags": call_prompt_tags,
             "livekit_room_name": call.livekit_room_name if call else room_name,
             "telnyx_call_control_id": call.telnyx_call_control_id if call else call_control_id,
             "twilio_call_sid": call.twilio_call_sid if call else call_sid,

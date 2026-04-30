@@ -60,6 +60,25 @@
           <input type="text" name="notes" placeholder="Optional context for this one call" />
         </div>
       </div>
+      <div class="row">
+        <div>
+          <label>Tag: Website</label>
+          <input type="text" name="tag_website" placeholder="example.com" />
+        </div>
+        <div>
+          <label>Tag: Reason</label>
+          <input type="text" name="tag_reason" placeholder="you were looking for dental treatment abroad" />
+        </div>
+        <div>
+          <label>Tag: Specific</label>
+          <input type="text" name="tag_specific" placeholder="implants, veneers, whitening..." />
+        </div>
+      </div>
+      <div>
+        <label>Extra Tags</label>
+        <textarea name="extra_tags" placeholder="city=Tirana&#10;source=website form"></textarea>
+        <p class="muted">Use one tag per line as <code>key=value</code> or <code>key: value</code>. These tags can be used in templates like <code>[website]</code>, <code>[reason]</code>, <code>[specific]</code>, <code>[name]</code>, <code>[notes]</code>, or your own custom tags such as <code>[city]</code>.</p>
+      </div>
       <div class="actions">
         <button type="submit">Start Outgoing Call</button>
       </div>
@@ -160,17 +179,17 @@
     <div>
       <label>Opening Phrase</label>
       <textarea name="opening_phrase">{{ outgoing_profile_form.opening_phrase }}</textarea>
-      <p class="muted">This is the first thing the outgoing agent says once the callee answers and the call is bridged into LiveKit. It is fully separate from the inbound receptionist greeting.</p>
+      <p class="muted">This is the first thing the outgoing agent says once the callee answers and the call is bridged into LiveKit. It is fully separate from the inbound receptionist greeting. You can use launch-time tags like <code>[website]</code>, <code>[reason]</code>, <code>[specific]</code>, <code>[name]</code>, and <code>[notes]</code>.</p>
     </div>
     <div>
       <label>Outgoing Prompt</label>
       <textarea name="system_prompt">{{ outgoing_profile_form.system_prompt }}</textarea>
-      <p class="muted">This prompt is the outbound agent's source of truth. It is kept separate from the inbound receptionist prompt, services, and FAQ runtime.</p>
+      <p class="muted">This prompt is the outbound agent's source of truth. It is kept separate from the inbound receptionist prompt, services, and FAQ runtime. Launch-time tags are rendered into this prompt for each specific call.</p>
     </div>
     <div>
       <label>Outbound Notes / Knowledge</label>
       <textarea name="notes">{{ outgoing_profile_form.notes }}</textarea>
-      <p class="muted">Use this for outbound-specific context or what the caller should be told.</p>
+      <p class="muted">Use this for outbound-specific context or what the caller should be told. Tags from the launch form are rendered here too.</p>
     </div>
     <div class="row">
       <div>
@@ -195,7 +214,7 @@
 
 <section class="panel" style="margin-top: 18px;">
   <h2>Outgoing Knowledge Tools</h2>
-  <p class="muted">These tools stay out of the base prompt until the agent chooses to load them during the call.</p>
+  <p class="muted">These tools stay out of the base prompt until the agent chooses to load them during the call. Tool content can also use launch-time tags like <code>[website]</code> or <code>[name]</code>.</p>
   <form method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/tools" class="stack">
     <input type="hidden" name="tool_id" value="" />
     <div class="row">

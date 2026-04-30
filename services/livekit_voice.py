@@ -119,11 +119,23 @@ async def ensure_telnyx_outbound_trunk() -> dict[str, str]:
 
 async def create_agent_dispatch(*, room_name: str, metadata: dict[str, Any], agent_name: str | None = None) -> dict[str, str]:
     from livekit.protocol import agent_dispatch
+    from livekit.protocol import room as room_proto
 
     api = await _api_client()
     try:
-        existing = await api.agent_dispatch.list_dispatch(room_name=room_name)
         target_agent_name = str(agent_name or LIVEKIT_OUTGOING_AGENT_NAME or "outgoing-agent").strip() or "outgoing-agent"
+        try:
+            await api.room.create_room(
+                room_proto.CreateRoomRequest(
+                    name=room_name,
+                    empty_timeout=300,
+                    departure_timeout=30,
+                )
+            )
+        except Exception as exc:
+            logger.info("[LIVEKIT_VOICE] create_room skipped room=%s error=%s", room_name, exc)
+
+        existing = await api.agent_dispatch.list_dispatch(room_name=room_name)
         for item in existing:
             if str(item.agent_name or "").strip() == target_agent_name:
                 return {"dispatch_id": str(item.id or ""), "room_name": str(item.room or room_name)}

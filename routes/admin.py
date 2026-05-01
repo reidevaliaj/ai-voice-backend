@@ -463,6 +463,19 @@ def _call_recording_urls(call: Any) -> dict[str, str]:
     return recording_urls if isinstance(recording_urls, dict) else {}
 
 
+def _call_recording_reference_time(call: Any) -> datetime | None:
+    for value in (
+        getattr(call, "started_at", None),
+        getattr(call, "created_at", None),
+        getattr(call, "answered_at", None),
+        getattr(call, "bridged_at", None),
+        getattr(call, "ended_at", None),
+    ):
+        if value is not None:
+            return value
+    return None
+
+
 def _call_needs_telnyx_recording_lookup(call: Any) -> bool:
     if getattr(call, "provider", "") != "telnyx":
         return False
@@ -489,16 +502,11 @@ def _recording_match_score(call: Any, recording: dict[str, Any]) -> float | None
     if expected_connection_id and recording_connection_id and expected_connection_id != recording_connection_id:
         return None
 
-    call_time = (
-        getattr(call, "ended_at", None)
-        or getattr(call, "answered_at", None)
-        or getattr(call, "started_at", None)
-        or getattr(call, "created_at", None)
-    )
+    call_time = _call_recording_reference_time(call)
     recording_time = (
-        _parse_iso_datetime(recording.get("recording_ended_at"))
-        or _parse_iso_datetime(recording.get("recording_started_at"))
+        _parse_iso_datetime(recording.get("recording_started_at"))
         or _parse_iso_datetime(recording.get("created_at"))
+        or _parse_iso_datetime(recording.get("recording_ended_at"))
         or _parse_iso_datetime(recording.get("updated_at"))
     )
     if call_time is None or recording_time is None:
@@ -517,6 +525,12 @@ async def _enrich_recent_outgoing_calls_with_recordings(outgoing_db: Session, ca
         logger.warning("[OUTGOING_RECORDINGS] lookup failed count=%s error=%s", len(candidates), exc)
         return calls
 
+    candidates.sort(
+        key=lambda call: (
+            _call_recording_reference_time(call) or datetime.min.replace(tzinfo=timezone.utc),
+            str(getattr(call, "id", "") or ""),
+        )
+    )
     used_recording_ids: set[str] = set()
     lookup_timestamp = datetime.now(timezone.utc).isoformat()
     for call in candidates:

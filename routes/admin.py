@@ -529,31 +529,34 @@ async def _enrich_recent_outgoing_calls_with_recordings(outgoing_db: Session, ca
         logger.warning("[OUTGOING_RECORDINGS] lookup failed count=%s error=%s", len(candidates), exc)
         return calls
 
-    candidates.sort(
-        key=lambda call: (
-            _call_recording_reference_time(call) or datetime.min.replace(tzinfo=timezone.utc),
-            str(getattr(call, "id", "") or ""),
-        )
-    )
-    used_recording_ids: set[str] = set()
-    lookup_timestamp = datetime.now(timezone.utc).isoformat()
+    candidate_pairs: list[tuple[float, datetime, str, str, Any, dict[str, Any]]] = []
     for call in candidates:
-        best_recording = None
-        best_score = None
+        call_time = _call_recording_reference_time(call) or datetime.min.replace(tzinfo=timezone.utc)
         for recording in recordings:
             recording_id = str(recording.get("id") or "").strip()
-            if not recording_id or recording_id in used_recording_ids:
-                continue
             download_urls = recording.get("download_urls") if isinstance(recording.get("download_urls"), dict) else {}
-            if not download_urls:
+            if not recording_id or not download_urls:
                 continue
             score = _recording_match_score(call, recording)
             if score is None or score > 7200:
                 continue
-            if best_score is None or score < best_score:
-                best_recording = recording
-                best_score = score
+            candidate_pairs.append((score, call_time, str(getattr(call, "id", "") or ""), recording_id, call, recording))
 
+    candidate_pairs.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    assigned_calls: dict[str, dict[str, Any]] = {}
+    used_recording_ids: set[str] = set()
+    for score, _, call_id, recording_id, call, recording in candidate_pairs:
+        if call_id in assigned_calls or recording_id in used_recording_ids:
+            continue
+        assigned_calls[call_id] = {
+            "recording": recording,
+            "score": score,
+        }
+        used_recording_ids.add(recording_id)
+
+    lookup_timestamp = datetime.now(timezone.utc).isoformat()
+    for call in candidates:
+        best_recording = (assigned_calls.get(str(getattr(call, "id", "") or "")) or {}).get("recording")
         if best_recording is None:
             update_outgoing_call_extra(
                 outgoing_db,
@@ -565,7 +568,6 @@ async def _enrich_recent_outgoing_calls_with_recordings(outgoing_db: Session, ca
             )
             continue
 
-        used_recording_ids.add(str(best_recording.get("id") or ""))
         download_urls = best_recording.get("download_urls") if isinstance(best_recording.get("download_urls"), dict) else {}
         update_outgoing_call_extra(
             outgoing_db,

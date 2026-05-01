@@ -476,6 +476,10 @@ def _call_recording_reference_time(call: Any) -> datetime | None:
     return None
 
 
+def _normalize_phone_match_value(value: Any) -> str:
+    return normalize_phone_number(str(value or "")).lstrip("+")
+
+
 def _call_needs_telnyx_recording_lookup(call: Any) -> bool:
     if getattr(call, "provider", "") != "telnyx":
         return False
@@ -490,11 +494,11 @@ def _call_needs_telnyx_recording_lookup(call: Any) -> bool:
 
 
 def _recording_match_score(call: Any, recording: dict[str, Any]) -> float | None:
-    call_from = normalize_phone_number(str(getattr(call, "from_number", "") or ""))
-    call_to = normalize_phone_number(str(getattr(call, "target_number", "") or ""))
-    if call_from and call_from != normalize_phone_number(str(recording.get("from") or "")):
+    call_from = _normalize_phone_match_value(getattr(call, "from_number", ""))
+    call_to = _normalize_phone_match_value(getattr(call, "target_number", ""))
+    if call_from and call_from != _normalize_phone_match_value(recording.get("from") or ""):
         return None
-    if call_to and call_to != normalize_phone_number(str(recording.get("to") or "")):
+    if call_to and call_to != _normalize_phone_match_value(recording.get("to") or ""):
         return None
 
     expected_connection_id = str((getattr(call, "extra_json", {}) or {}).get("telnyx_credential_connection_id") or "").strip()

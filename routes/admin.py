@@ -41,10 +41,18 @@ from models import AdminUser, CallEvent, Tenant, TenantPhoneNumber
 from security import decrypt_json, mask_secret, verify_password
 from services.cartesia import OUTGOING_PINNED_CUSTOM_VOICES, get_cartesia_voice_options
 from services.livekit_voice import cleanup_outgoing_room, create_agent_dispatch, ensure_telnyx_outbound_trunk
+from services.outgoing_bulk import (
+    BULK_BATCH_ACTIVE_STATUSES,
+    create_bulk_batch,
+    get_bulk_batch,
+    list_recent_bulk_batches,
+    parse_bulk_csv_upload,
+    refresh_bulk_batch_counts,
+    request_stop_bulk_batch,
+)
 from services.outgoing import (
     build_outgoing_prompt_tags,
     clear_outgoing_events,
-    create_outgoing_call,
     delete_outgoing_prompt_tool,
     ensure_outgoing_profile,
     get_default_outgoing_number,
@@ -62,6 +70,12 @@ from services.outgoing import (
     log_outgoing_event,
     update_outgoing_call_extra,
     upsert_outgoing_number,
+)
+from services.outgoing_launch import (
+    OutgoingLaunchError,
+    OutgoingLaunchRequest,
+    launch_outgoing_call as launch_outgoing_call_service,
+    validate_outgoing_launch_request,
 )
 from services.telnyx_voice import (
     dial_call as telnyx_dial_call,
@@ -110,6 +124,7 @@ OUTGOING_ACTIVE_STATUSES = {
     "awaiting_machine_detection",
     "human_detected",
     "livekit_transfer_requested",
+    "bridged",
 }
 OUTGOING_PROVIDER_CHOICES = (
     {"value": "telnyx", "label": "Telnyx"},
@@ -806,6 +821,9 @@ async def tenant_outgoing_detail(
         voice_error = str(exc)
     recent_calls = list_recent_outgoing_calls(outgoing_db, tenant.id)
     recent_calls = await _enrich_recent_outgoing_calls_with_recordings(outgoing_db, recent_calls)
+    recent_bulk_batches = list_recent_bulk_batches(outgoing_db, tenant.id)
+    for batch in recent_bulk_batches:
+        refresh_bulk_batch_counts(outgoing_db, batch)
     outgoing_prompt_tools = list_outgoing_prompt_tools(outgoing_db, tenant.id)
     outgoing_debug_timeline = _build_debug_timeline(OUTGOING_AGENT_DEBUG_LOG_PATH)
     return templates.TemplateResponse(
@@ -820,8 +838,10 @@ async def tenant_outgoing_detail(
             "outgoing_numbers": outgoing_numbers,
             "active_provider_numbers": provider_numbers,
               "recent_outgoing_calls": recent_calls,
+              "recent_bulk_batches": recent_bulk_batches,
               "outgoing_prompt_tools": outgoing_prompt_tools,
               "outgoing_active_statuses": sorted(OUTGOING_ACTIVE_STATUSES),
+              "bulk_batch_active_statuses": sorted(BULK_BATCH_ACTIVE_STATUSES),
               "outgoing_agent_debug_log": outgoing_debug_timeline["log"],
             "outgoing_agent_debug_timeline": outgoing_debug_timeline,
             "telnyx_key_configured": bool(TELNYX_API_KEY),
@@ -1087,7 +1107,7 @@ async def save_outgoing_number_action(
 
 
 @router.post("/admin/tenants/{slug}/outgoing/calls")
-async def launch_outgoing_call(
+async def launch_outgoing_call_action(
     slug: str,
     request: Request,
     db: Session = Depends(get_db),
@@ -1100,204 +1120,118 @@ async def launch_outgoing_call(
     active_config = get_active_config(db, tenant.id)
     profile = ensure_outgoing_profile(outgoing_db, tenant, active_config=active_config)
     form = await request.form()
-    target_number = normalize_phone_number(str(form.get("target_number") or ""))
-    target_name = str(form.get("target_name") or "").strip()
-    notes = str(form.get("notes") or "").strip()
-    tag_website = str(form.get("tag_website") or "").strip()
-    tag_reason = str(form.get("tag_reason") or "").strip()
-    tag_specific = str(form.get("tag_specific") or "").strip()
-    extra_tags_raw = str(form.get("extra_tags") or "").strip()
-    selected_from_number = normalize_phone_number(str(form.get("from_number") or ""))
-    provider = str(profile.provider or "telnyx").strip().lower() or "telnyx"
-    handoff_mode = (TELNYX_OUTGOING_HANDOFF_MODE or "direct").strip().lower()
-    provider_numbers = {
-        item.phone_number
-        for item in list_outgoing_numbers(outgoing_db, tenant.id)
-        if str(item.provider or "telnyx").strip().lower() == provider and item.status == "active"
-    }
-    default_number = get_default_outgoing_number(outgoing_db, tenant.id, provider)
-    from_number = selected_from_number or (default_number.phone_number if default_number else "")
-    if provider == "telnyx" and handoff_mode == "livekit_first":
-        if not (LIVEKIT_URL and LIVEKIT_API_KEY and LIVEKIT_API_SECRET):
-            _flash(request, "error", "LiveKit management API credentials are missing on the backend server")
-            return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
-        if not (LIVEKIT_TELNYX_OUTBOUND_TRUNK_ID or (LIVEKIT_TELNYX_OUTBOUND_HOST and LIVEKIT_TELNYX_OUTBOUND_USERNAME and LIVEKIT_TELNYX_OUTBOUND_PASSWORD)):
-            _flash(request, "error", "LiveKit Telnyx outbound trunk settings are missing on the backend server")
-            return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
-    elif not (LIVEKIT_OUTGOING_SIP_URI and LIVEKIT_OUTGOING_SIP_USERNAME and LIVEKIT_OUTGOING_SIP_PASSWORD):
-        _flash(request, "error", "The outgoing LiveKit SIP target is not configured on the backend server yet")
-        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
-    if not target_number:
-        _flash(request, "error", "A destination phone number is required")
-        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
-    if not from_number:
-        _flash(request, "error", "Save at least one outgoing caller ID for this tenant first")
-        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
-    if provider_numbers and from_number not in provider_numbers:
-        _flash(request, "error", f"Choose a caller ID saved for the {provider} provider")
-        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
-    if profile.status != "active":
-        _flash(request, "error", "Set the tenant's outgoing status to active before launching calls")
-        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
-    if provider == "telnyx" and not TELNYX_API_KEY:
-        if handoff_mode != "livekit_first":
-            _flash(request, "error", "TELNYX_API_KEY is missing on the backend server")
-            return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
-    if provider == "telnyx" and not profile.telnyx_connection_id:
-        if handoff_mode != "livekit_first":
-            _flash(request, "error", "Save the tenant's Telnyx Voice API application ID first")
-            return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
-    if provider == "twilio" and not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN):
-        _flash(request, "error", "TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is missing on the backend server")
-        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
-
-    call = create_outgoing_call(
-        outgoing_db,
+    launch_request = OutgoingLaunchRequest(
         tenant=tenant,
         profile=profile,
-        target_number=target_number,
-        from_number=from_number,
-        target_name=target_name,
-        notes=notes,
-        tenant_config_version=active_config.version if active_config else 1,
+        active_config=active_config,
+        target_number=normalize_phone_number(str(form.get("target_number") or "")),
+        target_name=str(form.get("target_name") or "").strip(),
+        notes=str(form.get("notes") or "").strip(),
+        from_number=normalize_phone_number(str(form.get("from_number") or "")),
+        tag_website=str(form.get("tag_website") or "").strip(),
+        tag_reason=str(form.get("tag_reason") or "").strip(),
+        tag_specific=str(form.get("tag_specific") or "").strip(),
+        extra_tags_raw=str(form.get("extra_tags") or "").strip(),
     )
-    prompt_tags = build_outgoing_prompt_tags(
-        tenant_display_name=tenant.display_name,
-        caller_display_name=profile.caller_display_name or tenant.display_name,
-        target_name=target_name,
-        target_number=target_number,
-        from_number=from_number,
-        notes=notes,
-        website=tag_website,
-        reason=tag_reason,
-        specific=tag_specific,
-        extra_tags=parse_outgoing_prompt_tags(extra_tags_raw),
-    )
-    call.opening_phrase = render_outgoing_template(profile.opening_phrase, prompt_tags) or profile.opening_phrase
-    call.extra_json = {
-        **(call.extra_json or {}),
-        "provider": provider,
-        "handoff_mode": handoff_mode,
-        "amd_mode": TELNYX_OUTGOING_AMD_MODE,
-        "launch_notes": notes,
-        "prompt_tags": prompt_tags,
-        "extra_tags_raw": extra_tags_raw,
-        "rendered_system_prompt": render_outgoing_template(profile.system_prompt, prompt_tags),
-        "rendered_profile_notes": render_outgoing_template(profile.notes, prompt_tags),
-    }
-    outgoing_db.flush()
-
     try:
-        if provider == "telnyx":
-            if handoff_mode == "livekit_first":
-                trunk = await ensure_telnyx_outbound_trunk()
-                room_name = _outgoing_room_name(call.id)
-                participant_identity = f"callee-{call.id}"
-                recording_state: dict[str, Any] = {}
-                try:
-                    recording_state = await ensure_outbound_recording_for_connection(
-                        sip_username=LIVEKIT_TELNYX_OUTBOUND_USERNAME,
-                        caller_number=from_number,
-                    )
-                except Exception as exc:
-                    logger.warning("[OUTGOING_RECORDINGS] could not enable Telnyx trunk recording call_id=%s error=%s", call.id, exc)
-                    recording_state = {
-                        "recording_enabled": False,
-                        "recording_error": str(exc),
-                    }
-                dispatch_metadata = {
-                    "mode": "livekit_first",
-                    "provider": "telnyx",
-                    "tenant_id": tenant.id,
-                    "tenant_slug": tenant.slug,
-                    "outgoing_call_id": call.id,
-                    "phone_number": target_number,
-                    "from_number": from_number,
-                    "participant_identity": participant_identity,
-                    "participant_name": target_name or target_number,
-                    "caller_display_name": profile.caller_display_name or tenant.display_name,
-                    "sip_trunk_id": trunk["sip_trunk_id"],
-                }
-                dispatch = await create_agent_dispatch(
-                    room_name=room_name,
-                    metadata=dispatch_metadata,
-                    agent_name=LIVEKIT_OUTGOING_AGENT_NAME,
-                )
-                call.livekit_room_name = room_name
-                call.status = "dialing"
-                call.started_at = call.started_at or datetime.now(timezone.utc)
-                call.provider_call_sid = ""
-                call.telnyx_call_control_id = ""
-                call.telnyx_call_leg_id = ""
-                call.telnyx_call_session_id = ""
-                call.extra_json = {
-                    **(call.extra_json or {}),
-                    "livekit_first": True,
-                    "livekit_dispatch_id": dispatch.get("dispatch_id", ""),
-                    "livekit_participant_identity": participant_identity,
-                    "livekit_outbound_trunk_id": trunk["sip_trunk_id"],
-                    "livekit_dispatch_metadata": dispatch_metadata,
-                    "telnyx_credential_connection_id": recording_state.get("connection_id", ""),
-                    "telnyx_outbound_voice_profile_id": recording_state.get("outbound_voice_profile_id", ""),
-                    "recording_expected": bool(recording_state.get("recording_enabled")),
-                    "recording_provider": "telnyx_outbound_voice_profile",
-                    "recording_provider_updated": bool(recording_state.get("updated")),
-                    "recording_provider_settings": recording_state.get("call_recording", {}),
-                    "recording_enable_error": str(recording_state.get("recording_error") or ""),
-                }
-                outgoing_db.flush()
-            else:
-                client_state = encode_client_state(
-                    {
-                        "provider": "telnyx",
-                        "mode": "outgoing",
-                        "tenant_id": tenant.id,
-                        "tenant_slug": tenant.slug,
-                        "outgoing_call_id": call.id,
-                        "target_number": target_number,
-                        "from_number": from_number,
-                    }
-                )
-                dial_payload = {
-                    "connection_id": profile.telnyx_connection_id,
-                    "to": target_number,
-                    "from": from_number,
-                    "from_display_name": profile.caller_display_name or tenant.display_name,
-                    "webhook_url": f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/telnyx/webhook",
-                    "webhook_url_method": "POST",
-                    "client_state": client_state,
-                    "command_id": telnyx_command_id("outgoing-dial", call.id),
-                }
-                if handoff_mode == "amd":
-                    dial_payload["answering_machine_detection"] = TELNYX_OUTGOING_AMD_MODE
-                result = await telnyx_dial_call(dial_payload)
-                data = result.get("data") or {}
-                call.telnyx_call_control_id = str(data.get("call_control_id") or call.telnyx_call_control_id or "")
-                call.provider_call_sid = call.telnyx_call_control_id or call.provider_call_sid or ""
-                call.telnyx_call_leg_id = str(data.get("call_leg_id") or call.telnyx_call_leg_id or "")
-                call.telnyx_call_session_id = str(data.get("call_session_id") or call.telnyx_call_session_id or "")
-                call.status = "dialing"
-                outgoing_db.flush()
-        else:
-            twiml_url = f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/twilio/twiml?outgoing_call_id={call.id}"
-            status_callback = f"{PUBLIC_BASE_URL.rstrip('/')}/outgoing/twilio/status?outgoing_call_id={call.id}"
-            result = await twilio_dial_call(
-                to=target_number,
-                from_number=from_number,
-                url=twiml_url,
-                status_callback=status_callback,
-            )
-            call.twilio_call_sid = str(result.get("sid") or call.twilio_call_sid or "")
-            call.provider_call_sid = call.twilio_call_sid or call.provider_call_sid or ""
-            call.status = str(result.get("status") or "queued").strip().lower() or "queued"
-            outgoing_db.flush()
-        _flash(request, "success", f"Outgoing {provider} call started to {target_number}")
-    except Exception as exc:
-        call.status = "failed"
-        call.last_error = str(exc)
-        outgoing_db.flush()
+        provider, _, _ = validate_outgoing_launch_request(outgoing_db, launch_request)
+        call = await launch_outgoing_call_service(outgoing_db, launch_request)
+        _flash(request, "success", f"Outgoing {provider} call started to {call.target_number}")
+    except OutgoingLaunchError as exc:
         _flash(request, "error", f"Could not start the outgoing call: {exc}")
 
+    return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+
+@router.post("/admin/tenants/{slug}/outgoing/bulk")
+async def launch_bulk_outgoing_calls(
+    slug: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    active_config = get_active_config(db, tenant.id)
+    profile = ensure_outgoing_profile(outgoing_db, tenant, active_config=active_config)
+    form = await request.form()
+    upload = form.get("csv_file")
+    if upload is None or not hasattr(upload, "filename"):
+        _flash(request, "error", "Upload a CSV file first")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+    try:
+        max_calls = max(1, int(str(form.get("max_calls") or "1").strip() or "1"))
+    except ValueError:
+        _flash(request, "error", "Max Calls must be a whole number")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+    raw_bytes = await upload.read()
+    selected_from_number = normalize_phone_number(str(form.get("from_number") or ""))
+    parsed_csv = None
+    try:
+        parsed_csv = parse_bulk_csv_upload(str(upload.filename or "bulk-calls.csv"), raw_bytes)
+        if not parsed_csv["rows"]:
+            _flash(request, "error", "The CSV did not contain any valid rows with a phone number")
+            return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+        validate_outgoing_launch_request(
+            outgoing_db,
+            OutgoingLaunchRequest(
+                tenant=tenant,
+                profile=profile,
+                active_config=active_config,
+                target_number=parsed_csv["rows"][0]["target_number"],
+                from_number=selected_from_number,
+            ),
+        )
+        batch = create_bulk_batch(
+            outgoing_db,
+            tenant=tenant,
+            profile=profile,
+            provider=str(profile.provider or "telnyx").strip().lower() or "telnyx",
+            from_number=selected_from_number,
+            source_filename=str(upload.filename or "bulk-calls.csv"),
+            source_headers=parsed_csv["headers"],
+            rows=parsed_csv["rows"],
+            max_calls=max_calls,
+            delay_seconds=20,
+            extra_json={
+                "source_row_count": parsed_csv["source_row_count"],
+                "invalid_rows": parsed_csv["invalid_rows"],
+                "queued_rows": min(len(parsed_csv["rows"]), max_calls),
+            },
+        )
+        _flash(
+            request,
+            "success",
+            f"Bulk call batch queued with {batch.total_rows} call(s). Invalid rows skipped: {len(parsed_csv['invalid_rows'])}.",
+        )
+    except (OutgoingLaunchError, ValueError) as exc:
+        _flash(request, "error", f"Could not queue bulk calls: {exc}")
+
+    return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+
+
+@router.post("/admin/tenants/{slug}/outgoing/bulk/{batch_id}/interrupt")
+async def interrupt_bulk_outgoing_calls(
+    slug: str,
+    batch_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    require_admin(request, db)
+    tenant = get_tenant_by_slug(db, slug)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    batch = get_bulk_batch(outgoing_db, batch_id, tenant_id=tenant.id)
+    if batch is None:
+        _flash(request, "error", "Bulk batch not found")
+        return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
+    request_stop_bulk_batch(outgoing_db, batch)
+    _flash(request, "success", "Bulk batch interruption requested")
     return RedirectResponse(url=f"/admin/tenants/{slug}/outgoing", status_code=303)
 
 

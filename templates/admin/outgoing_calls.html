@@ -87,6 +87,82 @@
 </div>
 
 <section class="panel" style="margin-top: 18px;">
+  <h2>Bulk Calls</h2>
+  <p class="muted">Upload a CSV with at least the headers <code>number</code> and <code>website</code>. Extra headers such as <code>reason</code>, <code>specific</code>, <code>name</code>, or <code>notes</code> are used as per-row tags automatically.</p>
+  <form method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/bulk" enctype="multipart/form-data" class="stack">
+    <div class="row">
+      <div>
+        <label>Upload CSV</label>
+        <input type="file" name="csv_file" accept=".csv,text/csv" required />
+      </div>
+      <div>
+        <label>Caller ID Number</label>
+        <select name="from_number">
+          {% for item in active_provider_numbers %}
+          <option value="{{ item.phone_number }}" {% if item.is_default %}selected{% endif %}>
+            {{ item.phone_number }}{% if item.label %} - {{ item.label }}{% endif %}{% if item.is_default %} (default){% endif %}
+          </option>
+          {% else %}
+          <option value="">Save an outgoing {{ outgoing_profile_form.provider }} caller ID first</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Max Calls</label>
+        <input type="number" name="max_calls" min="1" step="1" value="10" required />
+        <p class="muted">The batch will queue at most this many rows from the CSV.</p>
+      </div>
+    </div>
+    <div class="actions">
+      <button type="submit">Start Bulk Calls</button>
+    </div>
+  </form>
+
+  <table style="margin-top: 14px;">
+    <thead>
+      <tr>
+        <th>Created</th>
+        <th>Status</th>
+        <th>Provider</th>
+        <th>From</th>
+        <th>File</th>
+        <th>Remaining</th>
+        <th>Completed</th>
+        <th>Failed</th>
+        <th>Stopped</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for batch in recent_bulk_batches %}
+      <tr>
+        <td>{{ batch.created_at }}</td>
+        <td>{{ batch.status }}</td>
+        <td>{{ batch.provider }}</td>
+        <td><code>{{ batch.from_number or "-" }}</code></td>
+        <td>{{ batch.source_filename or "-" }}</td>
+        <td><code>{{ batch.total_rows - batch.completed_count - batch.failed_count - batch.stopped_count }}</code> / <code>{{ batch.total_rows }}</code></td>
+        <td><code>{{ batch.completed_count }}</code></td>
+        <td><code>{{ batch.failed_count }}</code></td>
+        <td><code>{{ batch.stopped_count }}</code></td>
+        <td>
+          {% if batch.status in bulk_batch_active_statuses %}
+          <form method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/bulk/{{ batch.id }}/interrupt">
+            <button type="submit" class="secondary">Interrupt</button>
+          </form>
+          {% else %}
+          <span class="muted">-</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="10" class="muted">No bulk call batches yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel" style="margin-top: 18px;">
   <h2>Outgoing Configuration</h2>
   <form method="post" action="/admin/tenants/{{ tenant.slug }}/outgoing/config" class="stack">
     <div class="row">

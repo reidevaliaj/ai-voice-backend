@@ -24,6 +24,7 @@ AGENT_DEBUG_LOG_PATH = _env("AGENT_DEBUG_LOG_PATH", "/home/rei/apps/livekit-agen
 AGENT_LOG_PATH = _env("AGENT_LOG_PATH", "/home/rei/apps/livekit-agent/agent.log")
 OUTGOING_AGENT_DEBUG_LOG_PATH = _env("OUTGOING_AGENT_DEBUG_LOG_PATH", "/home/rei/apps/livekit-agent/runtime/outgoing_call_debug.log")
 OUTGOING_AGENT_LOG_PATH = _env("OUTGOING_AGENT_LOG_PATH", "/home/rei/apps/livekit-agent/outgoing_agent.log")
+OUTGOING_BULK_WORKER_POLL_SECONDS = float(_env("OUTGOING_BULK_WORKER_POLL_SECONDS", "3") or "3")
 DEBUG_LOG_MAX_CHARS = int(_env("DEBUG_LOG_MAX_CHARS", "25000") or "25000")
 DEFAULT_TENANT_SLUG = _env("DEFAULT_TENANT_SLUG", "codestudio")
 DEFAULT_INBOUND_PHONE_NUMBER = _env("DEFAULT_INBOUND_PHONE_NUMBER")

@@ -42,6 +42,7 @@ class OutgoingTenantProfile(OutgoingBase):
     numbers: Mapped[list["OutgoingCallerNumber"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
     calls: Mapped[list["OutgoingCall"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
     prompt_tools: Mapped[list["OutgoingPromptTool"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
+    bulk_batches: Mapped[list["OutgoingBulkBatch"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
 
 
 class OutgoingCallerNumber(OutgoingBase):
@@ -105,6 +106,7 @@ class OutgoingCall(OutgoingBase):
 
     profile: Mapped["OutgoingTenantProfile | None"] = relationship(back_populates="calls")
     events: Mapped[list["OutgoingCallEvent"]] = relationship(back_populates="call", cascade="all, delete-orphan")
+    bulk_items: Mapped[list["OutgoingBulkItem"]] = relationship(back_populates="outgoing_call")
 
 
 class OutgoingPromptTool(OutgoingBase):
@@ -124,6 +126,66 @@ class OutgoingPromptTool(OutgoingBase):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
 
     profile: Mapped["OutgoingTenantProfile"] = relationship(back_populates="prompt_tools")
+
+
+class OutgoingBulkBatch(OutgoingBase):
+    __tablename__ = "outgoing_bulk_batches"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    profile_id: Mapped[str | None] = mapped_column(ForeignKey("outgoing_tenant_profiles.id", ondelete="SET NULL"), nullable=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    tenant_slug: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    provider: Mapped[str] = mapped_column(String(20), default="telnyx", nullable=False)
+    from_number: Mapped[str] = mapped_column(String(50), default="", nullable=False)
+    source_filename: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    source_headers_json: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    max_calls: Mapped[int] = mapped_column(default=0, nullable=False)
+    delay_seconds: Mapped[int] = mapped_column(default=20, nullable=False)
+    total_rows: Mapped[int] = mapped_column(default=0, nullable=False)
+    launched_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    completed_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    failed_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    stopped_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False, index=True)
+    stop_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    extra_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    profile: Mapped["OutgoingTenantProfile | None"] = relationship(back_populates="bulk_batches")
+    items: Mapped[list["OutgoingBulkItem"]] = relationship(back_populates="batch", cascade="all, delete-orphan")
+
+
+class OutgoingBulkItem(OutgoingBase):
+    __tablename__ = "outgoing_bulk_items"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "row_index", name="uq_outgoing_bulk_item_row"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    batch_id: Mapped[str] = mapped_column(ForeignKey("outgoing_bulk_batches.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    tenant_slug: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    row_index: Mapped[int] = mapped_column(nullable=False)
+    target_number: Mapped[str] = mapped_column(String(50), nullable=False)
+    target_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    row_tags_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    raw_row_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False, index=True)
+    outgoing_call_id: Mapped[str | None] = mapped_column(ForeignKey("outgoing_calls.id", ondelete="SET NULL"), nullable=True, index=True)
+    last_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+    launched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    batch: Mapped["OutgoingBulkBatch"] = relationship(back_populates="items")
+    outgoing_call: Mapped["OutgoingCall | None"] = relationship(back_populates="bulk_items")
 
 
 class OutgoingCallEvent(OutgoingBase):

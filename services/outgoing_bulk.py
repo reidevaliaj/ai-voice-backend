@@ -30,6 +30,7 @@ NUMBER_HEADER_ALIASES = ("number", "phone", "target_number")
 NAME_HEADER_ALIASES = ("name", "target_name")
 NOTES_HEADER_ALIASES = ("notes", "note")
 DEFAULT_BULK_DELAY_SECONDS = 20
+STALE_ACTIVE_OUTGOING_CALL_AFTER = timedelta(hours=3)
 
 
 def _utcnow() -> datetime:
@@ -247,16 +248,30 @@ def get_next_bulk_item(session: Session, batch_id: str) -> OutgoingBulkItem | No
 
 
 def get_active_outgoing_call_for_tenant(session: Session, tenant_id: str) -> OutgoingCall | None:
+    now = _utcnow()
     stmt = (
         select(OutgoingCall)
         .where(
             OutgoingCall.tenant_id == tenant_id,
             OutgoingCall.status.in_(OUTGOING_CALL_ACTIVE_STATUSES),
         )
-        .order_by(OutgoingCall.created_at.asc())
-        .limit(1)
+        .order_by(OutgoingCall.created_at.desc())
+        .limit(20)
     )
-    return session.scalar(stmt)
+    candidates = list(session.scalars(stmt))
+    for call in candidates:
+        reference_time = (
+            call.updated_at
+            or call.bridged_at
+            or call.answered_at
+            or call.started_at
+            or call.created_at
+        )
+        if reference_time is None:
+            return call
+        if now - reference_time <= STALE_ACTIVE_OUTGOING_CALL_AFTER:
+            return call
+    return None
 
 
 def mark_bulk_item_launched(session: Session, item: OutgoingBulkItem, outgoing_call_id: str) -> OutgoingBulkItem:

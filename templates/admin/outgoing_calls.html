@@ -453,8 +453,14 @@
         <td>
           {% set recording_urls = (call.extra_json or {}).get("public_recording_urls") or (call.extra_json or {}).get("recording_urls") or {} %}
           {% set recording_expected = (call.extra_json or {}).get("recording_expected") %}
-          {% if call.provider == "twilio" %}
-          <span class="muted">n/a</span>
+          {% if call.provider == "twilio" and recording_urls.get("mp3") %}
+          <a href="{{ twilio_recording_proxy_url(recording_urls.get('mp3'), 'mp3') }}" target="_blank" rel="noreferrer">mp3</a>
+          {% elif call.provider == "twilio" and recording_urls.get("wav") %}
+          <a href="{{ twilio_recording_proxy_url(recording_urls.get('wav'), 'wav') }}" target="_blank" rel="noreferrer">wav</a>
+          {% elif call.provider == "twilio" and call.status in ["completed", "failed"] %}
+          <span class="muted">not available</span>
+          {% elif call.provider == "twilio" %}
+          <span class="muted">pending</span>
           {% elif handoff_mode == "direct" %}
           <span class="muted">disabled</span>
           {% elif recording_urls.get("mp3") %}

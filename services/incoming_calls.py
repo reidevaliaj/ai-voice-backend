@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.recording_urls import build_telnyx_recording_urls, build_twilio_recording_urls
+
 
 def infer_incoming_provider(event: Any) -> str:
     event_type = str(getattr(event, "event_type", "") or "").strip().lower()
@@ -18,58 +20,60 @@ def incoming_call_key(event: Any) -> str:
     return parent or call_sid
 
 
-def _twilio_recording_urls(payload: dict[str, Any]) -> dict[str, str]:
-    base_url = str(payload.get("RecordingUrl") or payload.get("recording_url") or "").strip()
-    if not base_url:
-        return {}
-    if base_url.endswith(".mp3"):
-        mp3_url = base_url
-        wav_url = base_url[:-4] + ".wav"
-    elif base_url.endswith(".wav"):
-        wav_url = base_url
-        mp3_url = base_url[:-4] + ".mp3"
-    else:
-        mp3_url = f"{base_url}.mp3"
-        wav_url = f"{base_url}.wav"
-    return {"mp3": mp3_url, "wav": wav_url}
-
-
-def _telnyx_recording_urls(payload: dict[str, Any]) -> dict[str, str]:
-    for key in ("public_recording_urls", "recording_urls", "download_urls"):
-        value = payload.get(key)
-        if isinstance(value, dict):
-            return {str(name): str(url) for name, url in value.items() if str(url or "").strip()}
-    return {}
+def incoming_event_lookup_keys(event: Any) -> set[str]:
+    payload = dict(getattr(event, "payload_json", {}) or {})
+    keys: set[str] = set()
+    for value in (
+        getattr(event, "call_sid", ""),
+        getattr(event, "parent_call_sid", ""),
+        payload.get("CallSid"),
+        payload.get("ParentCallSid"),
+        payload.get("call_control_id"),
+        payload.get("parent_call_sid"),
+        payload.get("call_session_id"),
+        payload.get("RecordingSid"),
+        payload.get("recording_id"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            keys.add(text)
+    return keys
 
 
 def build_incoming_event_rows(events: list[Any]) -> list[dict[str, Any]]:
     recordings_by_call: dict[str, dict[str, Any]] = {}
     for event in events:
-        key = incoming_call_key(event)
-        if not key:
-            continue
         payload = dict(getattr(event, "payload_json", {}) or {})
         provider = infer_incoming_provider(event)
-        recording_urls = _telnyx_recording_urls(payload) if provider == "telnyx" else _twilio_recording_urls(payload)
+        recording_urls = build_telnyx_recording_urls(payload) if provider == "telnyx" else build_twilio_recording_urls(payload)
         if not recording_urls:
             continue
-        existing = recordings_by_call.get(key)
-        if existing is None or getattr(event, "created_at", None) >= existing.get("created_at"):
-            recordings_by_call[key] = {
-                "provider": provider,
-                "recording_urls": recording_urls,
-                "created_at": getattr(event, "created_at", None),
-            }
+        lookup_keys = incoming_event_lookup_keys(event)
+        if not lookup_keys:
+            continue
+        for key in lookup_keys:
+            existing = recordings_by_call.get(key)
+            if existing is None or getattr(event, "created_at", None) >= existing.get("created_at"):
+                recordings_by_call[key] = {
+                    "provider": provider,
+                    "recording_urls": recording_urls,
+                    "created_at": getattr(event, "created_at", None),
+                }
 
     rows: list[dict[str, Any]] = []
     for event in events:
-        key = incoming_call_key(event)
-        recording_state = recordings_by_call.get(key) or {}
+        lookup_keys = incoming_event_lookup_keys(event)
+        recording_state = {}
+        for key in lookup_keys:
+            if key in recordings_by_call:
+                recording_state = recordings_by_call[key]
+                break
         rows.append(
             {
                 "event": event,
                 "provider": infer_incoming_provider(event),
-                "call_key": key,
+                "call_key": incoming_call_key(event),
+                "lookup_keys": sorted(lookup_keys),
                 "recording_urls": recording_state.get("recording_urls") or {},
             }
         )

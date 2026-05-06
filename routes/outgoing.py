@@ -24,6 +24,7 @@ from app_config import (
     TELNYX_OUTGOING_RECORDING_FORMAT,
     TELNYX_OUTGOING_RECORDING_MAX_LENGTH,
     TELNYX_OUTGOING_WEBHOOK_PATH,
+    TWILIO_OUTGOING_RECORDING_STATUS_PATH,
     TWILIO_OUTGOING_SIP_STATUS_PATH,
     TWILIO_OUTGOING_STATUS_PATH,
     TWILIO_OUTGOING_TWIML_PATH,
@@ -42,6 +43,7 @@ from services.outgoing import (
     save_outgoing_transcript,
     update_outgoing_call_extra,
 )
+from services.recording_urls import build_twilio_recording_urls
 from services.telnyx_voice import (
     decode_client_state,
     encode_client_state,
@@ -65,6 +67,11 @@ TWILIO_OUTGOING_TWIML_ROUTE = TWILIO_OUTGOING_TWIML_PATH if TWILIO_OUTGOING_TWIM
 TWILIO_OUTGOING_STATUS_ROUTE = TWILIO_OUTGOING_STATUS_PATH if TWILIO_OUTGOING_STATUS_PATH.startswith("/") else f"/{TWILIO_OUTGOING_STATUS_PATH}"
 TWILIO_OUTGOING_SIP_STATUS_ROUTE = (
     TWILIO_OUTGOING_SIP_STATUS_PATH if TWILIO_OUTGOING_SIP_STATUS_PATH.startswith("/") else f"/{TWILIO_OUTGOING_SIP_STATUS_PATH}"
+)
+TWILIO_OUTGOING_RECORDING_STATUS_ROUTE = (
+    TWILIO_OUTGOING_RECORDING_STATUS_PATH
+    if TWILIO_OUTGOING_RECORDING_STATUS_PATH.startswith("/")
+    else f"/{TWILIO_OUTGOING_RECORDING_STATUS_PATH}"
 )
 
 
@@ -301,6 +308,27 @@ def _twilio_event_name(call_status: str) -> str:
     if normalized == "queued":
         return "initiated"
     return normalized or "status_callback"
+
+
+def _record_twilio_recording_metadata(outgoing_db: Session, call: Any, payload: dict[str, Any]) -> None:
+    recording_urls = build_twilio_recording_urls(payload)
+    if not recording_urls:
+        return
+    update_outgoing_call_extra(
+        outgoing_db,
+        call,
+        {
+            "recording_sid": str(payload.get("RecordingSid") or "").strip(),
+            "recording_urls": recording_urls,
+            "public_recording_urls": recording_urls,
+            "recording_status": str(payload.get("RecordingStatus") or "").strip(),
+            "recording_source": str(payload.get("RecordingSource") or "").strip(),
+            "recording_track": str(payload.get("RecordingTrack") or "").strip(),
+            "recording_channels": str(payload.get("RecordingChannels") or "").strip(),
+            "recording_duration": str(payload.get("RecordingDuration") or "").strip(),
+            "recording_start_time": str(payload.get("RecordingStartTime") or "").strip(),
+        },
+    )
 
 
 async def _ensure_primary_leg_recording(call: Any, tenant: Any, outgoing_db: Session) -> None:
@@ -867,9 +895,15 @@ async def twilio_outgoing_twiml(
         },
     )
     sip_status_callback = _public_url(TWILIO_OUTGOING_SIP_STATUS_ROUTE) + f"?outgoing_call_id={call.id}"
+    recording_status_callback = _public_url(TWILIO_OUTGOING_RECORDING_STATUS_ROUTE) + f"?outgoing_call_id={call.id}"
 
     vr = VoiceResponse()
-    dial = vr.dial(timeout=20)
+    dial = vr.dial(
+        timeout=20,
+        record="record-from-answer-dual",
+        recording_status_callback=recording_status_callback,
+        recording_status_callback_method="POST",
+    )
     dial.sip(
         sip_uri,
         username=LIVEKIT_OUTGOING_SIP_USERNAME,
@@ -919,6 +953,7 @@ async def twilio_outgoing_status(
             "twilio_sip_response_code": str(payload.get("SipResponseCode") or ""),
         },
     )
+    _record_twilio_recording_metadata(outgoing_db, call, payload)
     if tenant is not None:
         log_outgoing_event(
             outgoing_db,
@@ -971,6 +1006,7 @@ async def twilio_outgoing_sip_status(
             "twilio_sip_parent_call_sid": parent_call_sid,
         },
     )
+    _record_twilio_recording_metadata(outgoing_db, call, payload)
     if tenant is not None:
         log_outgoing_event(
             outgoing_db,
@@ -978,6 +1014,45 @@ async def twilio_outgoing_sip_status(
             tenant_slug=call.tenant_slug,
             event_type=f"twilio_sip_{event_type}",
             payload=event_payload,
+            call=call,
+            room_name=call.livekit_room_name,
+        )
+    return Response("OK")
+
+
+@router.api_route(TWILIO_OUTGOING_RECORDING_STATUS_ROUTE, methods=["GET", "POST"])
+async def twilio_outgoing_recording_status(
+    request: Request,
+    db: Session = Depends(get_db),
+    outgoing_db: Session = Depends(get_outgoing_db),
+):
+    payload = {**dict(request.query_params), **(await _request_form_dict(request))}
+    outgoing_call_id = str(payload.get("outgoing_call_id") or "").strip()
+    call_sid = str(payload.get("CallSid") or "").strip()
+    parent_call_sid = str(payload.get("ParentCallSid") or "").strip()
+    call = get_outgoing_call(
+        outgoing_db,
+        outgoing_call_id=outgoing_call_id,
+        provider_call_sid=parent_call_sid or call_sid,
+        twilio_call_sid=parent_call_sid or call_sid,
+    )
+    if call is None:
+        return Response("OK")
+
+    tenant = get_tenant_by_id(db, call.tenant_id)
+    _record_twilio_recording_metadata(outgoing_db, call, payload)
+    if tenant is not None:
+        log_outgoing_event(
+            outgoing_db,
+            tenant_id=call.tenant_id,
+            tenant_slug=call.tenant_slug,
+            event_type="twilio_recording_status",
+            payload={
+                **payload,
+                "provider": "twilio",
+                "provider_call_sid": parent_call_sid or call.provider_call_sid,
+                "outgoing_call_id": call.id,
+            },
             call=call,
             room_name=call.livekit_room_name,
         )

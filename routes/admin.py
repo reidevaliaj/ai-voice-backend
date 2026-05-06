@@ -41,7 +41,7 @@ from models import AdminUser, CallEvent, Tenant, TenantPhoneNumber
 from security import decrypt_json, mask_secret, verify_password
 from services.cartesia import OUTGOING_PINNED_CUSTOM_VOICES, get_cartesia_voice_options
 from services.call_debug_timeline import build_debug_timeline, parse_iso_datetime, truncate_log
-from services.incoming_calls import build_incoming_event_rows
+from services.incoming_calls import build_incoming_event_rows, incoming_event_lookup_keys
 from services.livekit_voice import cleanup_outgoing_room, create_agent_dispatch, ensure_telnyx_outbound_trunk
 from services.outgoing_bulk import (
     BULK_BATCH_ACTIVE_STATUSES,
@@ -346,6 +346,44 @@ async def _enrich_recent_outgoing_calls_with_recordings(outgoing_db: Session, ca
     return calls
 
 
+async def _enrich_recent_incoming_event_rows_with_telnyx_recordings(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    telnyx_rows = [row for row in rows if row.get("provider") == "telnyx"]
+    if not telnyx_rows or not TELNYX_API_KEY:
+        return rows
+
+    try:
+        recordings = await list_call_recordings(page_size=max(25, min(100, len(telnyx_rows) * 8)))
+    except Exception as exc:
+        logger.warning("[INCOMING_RECORDINGS] lookup failed count=%s error=%s", len(telnyx_rows), exc)
+        return rows
+
+    recordings_by_key: dict[str, dict[str, Any]] = {}
+    for recording in recordings:
+        download_urls = recording.get("download_urls") if isinstance(recording.get("download_urls"), dict) else {}
+        if not download_urls:
+            continue
+        for value in (
+            recording.get("id"),
+            recording.get("call_control_id"),
+            recording.get("call_session_id"),
+        ):
+            key = str(value or "").strip()
+            if key and key not in recordings_by_key:
+                recordings_by_key[key] = download_urls
+
+    for row in telnyx_rows:
+        event = row.get("event")
+        if event is None:
+            continue
+        lookup_keys = set(row.get("lookup_keys") or []) or incoming_event_lookup_keys(event)
+        for key in lookup_keys:
+            fresh_urls = recordings_by_key.get(key)
+            if fresh_urls:
+                row["recording_urls"] = fresh_urls
+                break
+    return rows
+
+
 def _latest_email_events(limit: int = 10, tenant_id: str | None = None) -> list[dict[str, Any]]:
     path = Path("data") / "email_summary_events.jsonl"
     if not path.exists():
@@ -507,6 +545,7 @@ async def tenant_detail(slug: str, request: Request, db: Session = Depends(get_d
         )
     )
     recent_incoming_event_rows = build_incoming_event_rows(recent_events)
+    recent_incoming_event_rows = await _enrich_recent_incoming_event_rows_with_telnyx_recordings(recent_incoming_event_rows)
     integration_summary = _integration_summary(db, tenant.id)
     runtime = build_runtime_context(db, tenant) if config else None
     selected_language = normalize_assistant_language((runtime or {}).get("config", {}).get("assistant_language", "en"))
@@ -639,6 +678,7 @@ async def tenant_outgoing_detail(
               "outgoing_prompt_tools": outgoing_prompt_tools,
               "outgoing_active_statuses": sorted(OUTGOING_ACTIVE_STATUSES),
               "bulk_batch_active_statuses": sorted(BULK_BATCH_ACTIVE_STATUSES),
+              "twilio_recording_proxy_url": _twilio_recording_proxy_url,
               "outgoing_agent_debug_log": outgoing_debug_timeline["log"],
             "outgoing_agent_debug_timeline": outgoing_debug_timeline,
             "telnyx_key_configured": bool(TELNYX_API_KEY),

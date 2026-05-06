@@ -14,6 +14,7 @@ from services.tenants import (
     get_active_config,
     normalize_assistant_language,
     normalize_endpointing_window,
+    normalize_interruption_min_words,
     normalize_phone_number,
     normalize_stt_language,
     normalize_tts_speed,
@@ -245,6 +246,7 @@ def ensure_outgoing_profile(session: Session, tenant: Any, active_config: Any | 
             tts_speed=tts_speed,
             min_endpointing_delay=min_endpointing_delay,
             max_endpointing_delay=max_endpointing_delay,
+            interruption_min_words=3,
             opening_phrase=default_outgoing_opening_phrase(tenant.display_name, assistant_language),
             system_prompt=default_outgoing_prompt(tenant.display_name, assistant_language),
             caller_display_name=tenant.display_name,
@@ -273,6 +275,8 @@ def ensure_outgoing_profile(session: Session, tenant: Any, active_config: Any | 
             profile.min_endpointing_delay = min_endpointing_delay
         if not profile.max_endpointing_delay:
             profile.max_endpointing_delay = max_endpointing_delay
+        if not getattr(profile, "interruption_min_words", 0):
+            profile.interruption_min_words = 3
         old_default_opening = default_outgoing_opening_phrase(tenant.display_name, "en")
         if profile.opening_phrase == old_default_opening and normalize_assistant_language(profile.assistant_language) != "en":
             profile.opening_phrase = default_outgoing_opening_phrase(tenant.display_name, profile.assistant_language)
@@ -393,6 +397,10 @@ def save_outgoing_profile(
     profile.tts_speed = normalize_tts_speed(payload.get("tts_speed") if payload.get("tts_speed") not in (None, "") else profile.tts_speed)
     profile.min_endpointing_delay = min_endpointing_delay
     profile.max_endpointing_delay = max_endpointing_delay
+    profile.interruption_min_words = normalize_interruption_min_words(
+        payload.get("interruption_min_words") if payload.get("interruption_min_words") not in (None, "") else getattr(profile, "interruption_min_words", 3),
+        default=3,
+    )
     profile.status = str(payload.get("status") or profile.status or "inactive").strip().lower() or "inactive"
     profile.provider = provider
     profile.telnyx_connection_id = str(payload.get("telnyx_connection_id") or "").strip()
@@ -421,6 +429,7 @@ def outgoing_profile_form_payload(profile: OutgoingTenantProfile | None, tenant:
             "tts_speed": 1.0,
             "min_endpointing_delay": 0.3,
             "max_endpointing_delay": 1.2,
+            "interruption_min_words": 3,
             "opening_phrase": default_outgoing_opening_phrase(tenant.display_name, assistant_language),
             "system_prompt": default_outgoing_prompt(tenant.display_name, assistant_language),
             "caller_display_name": tenant.display_name,
@@ -440,6 +449,7 @@ def outgoing_profile_form_payload(profile: OutgoingTenantProfile | None, tenant:
         "tts_speed": profile.tts_speed,
         "min_endpointing_delay": profile.min_endpointing_delay,
         "max_endpointing_delay": profile.max_endpointing_delay,
+        "interruption_min_words": normalize_interruption_min_words(getattr(profile, "interruption_min_words", 3), default=3),
         "opening_phrase": profile.opening_phrase,
         "system_prompt": profile.system_prompt,
         "caller_display_name": profile.caller_display_name,
@@ -827,6 +837,7 @@ def build_outgoing_runtime(
             "tts_speed": profile.tts_speed if profile.tts_speed else effective_config.get("tts_speed"),
             "min_endpointing_delay": profile_min_endpointing_delay,
             "max_endpointing_delay": profile_max_endpointing_delay,
+            "interruption_min_words": normalize_interruption_min_words(getattr(profile, "interruption_min_words", 3), default=3),
         }
     )
 
@@ -845,6 +856,7 @@ def build_outgoing_runtime(
             "tts_speed": profile.tts_speed,
             "min_endpointing_delay": profile_min_endpointing_delay,
             "max_endpointing_delay": profile_max_endpointing_delay,
+            "interruption_min_words": normalize_interruption_min_words(getattr(profile, "interruption_min_words", 3), default=3),
             "opening_phrase": (call.opening_phrase if call else profile.opening_phrase) or default_outgoing_opening_phrase(tenant.display_name, profile.assistant_language or effective_config.get("assistant_language") or "en"),
             "system_prompt": str(call_extra.get("rendered_system_prompt") or "").strip()
             or render_outgoing_template(

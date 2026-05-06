@@ -29,6 +29,7 @@ class OutgoingTenantProfile(OutgoingBase):
     tts_speed: Mapped[float] = mapped_column(default=1.0, nullable=False)
     min_endpointing_delay: Mapped[float] = mapped_column(default=0.3, nullable=False)
     max_endpointing_delay: Mapped[float] = mapped_column(default=1.2, nullable=False)
+    interruption_min_words: Mapped[int] = mapped_column(default=3, nullable=False)
     opening_phrase: Mapped[str] = mapped_column(Text, default="", nullable=False)
     system_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     caller_display_name: Mapped[str] = mapped_column(String(128), default="", nullable=False)

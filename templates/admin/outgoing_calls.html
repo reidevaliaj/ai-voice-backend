@@ -251,6 +251,11 @@
         <input type="number" name="max_endpointing_delay" min="0.1" max="6.0" step="0.05" value="{{ outgoing_profile_form.max_endpointing_delay }}" />
         <p class="muted">Suggested faster phone cap: 1.20 seconds.</p>
       </div>
+      <div>
+        <label>Interruption Min Words</label>
+        <input type="number" name="interruption_min_words" min="0" max="12" step="1" value="{{ outgoing_profile_form.interruption_min_words }}" />
+        <p class="muted">Require at least this many callee words before the assistant can be interrupted while it is speaking.</p>
+      </div>
     </div>
     <div>
       <label>Opening Phrase</label>

@@ -49,6 +49,7 @@ def _upgrade_outgoing_schema() -> None:
         "tts_speed": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN tts_speed FLOAT NOT NULL DEFAULT 1.0",
         "min_endpointing_delay": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN min_endpointing_delay FLOAT NOT NULL DEFAULT 0.3",
         "max_endpointing_delay": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN max_endpointing_delay FLOAT NOT NULL DEFAULT 1.2",
+        "interruption_min_words": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN interruption_min_words INTEGER NOT NULL DEFAULT 3",
         "summary_notification_targets": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN summary_notification_targets TEXT NOT NULL DEFAULT 'info@cod-st.com'",
         "summary_from_email": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN summary_from_email VARCHAR(255) NOT NULL DEFAULT 'info@cod-st.com'",
         "summary_reply_to_email": "ALTER TABLE outgoing_tenant_profiles ADD COLUMN summary_reply_to_email VARCHAR(255) NOT NULL DEFAULT ''",

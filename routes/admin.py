@@ -14,7 +14,6 @@ from sqlalchemy.orm import Session
 from app_config import (
     AGENT_DEBUG_LOG_PATH,
     AGENT_LOG_PATH,
-    DEBUG_LOG_MAX_CHARS,
     LIVEKIT_API_KEY,
     LIVEKIT_API_SECRET,
     LIVEKIT_OUTGOING_SIP_PASSWORD,
@@ -40,6 +39,8 @@ from outgoing_db import get_outgoing_db
 from models import AdminUser, CallEvent, Tenant, TenantPhoneNumber
 from security import decrypt_json, mask_secret, verify_password
 from services.cartesia import OUTGOING_PINNED_CUSTOM_VOICES, get_cartesia_voice_options
+from services.call_debug_timeline import build_debug_timeline, parse_iso_datetime, truncate_log
+from services.incoming_calls import build_incoming_event_rows
 from services.livekit_voice import cleanup_outgoing_room, create_agent_dispatch, ensure_telnyx_outbound_trunk
 from services.outgoing_bulk import (
     BULK_BATCH_ACTIVE_STATUSES,
@@ -97,6 +98,7 @@ from services.tenants import (
     integration_form_payload,
     normalize_assistant_language,
     normalize_endpointing_window,
+    normalize_interruption_min_words,
     normalize_phone_number,
     normalize_stt_language,
     normalize_tts_speed,
@@ -134,260 +136,6 @@ OUTGOING_PROVIDER_CHOICES = (
 
 def _outgoing_room_name(call_id: str) -> str:
     return f"outgoing-call-{call_id}"
-
-
-def _read_log_tail(path_value: str, max_chars: int = DEBUG_LOG_MAX_CHARS) -> dict[str, Any]:
-    path = Path(path_value)
-    if not path.exists():
-        return {"path": str(path), "exists": False, "content": "", "size": 0}
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except Exception as exc:
-        return {"path": str(path), "exists": True, "content": f"Unable to read log: {exc}", "size": 0}
-    content = raw[-max_chars:] if len(raw) > max_chars else raw
-    return {"path": str(path), "exists": True, "content": content, "size": len(raw)}
-
-
-def _parse_debug_value(raw: str) -> Any:
-    try:
-        return json.loads(raw)
-    except Exception:
-        return raw
-
-
-def _summarize_debug_fields(fields: dict[str, Any]) -> str:
-    preferred_keys = (
-        "text",
-        "new_state",
-        "old_state",
-        "room_name",
-        "provider",
-        "reason",
-        "name",
-        "status",
-        "output",
-        "notes",
-    )
-    parts: list[str] = []
-    for key in preferred_keys:
-        value = fields.get(key)
-        if value in (None, "", [], {}):
-            continue
-        rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        parts.append(f"{key}={rendered}")
-    if not parts:
-        remaining_keys = [key for key in fields.keys() if fields.get(key) not in (None, "", [], {})]
-        for key in remaining_keys[:4]:
-            value = fields.get(key)
-            rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-            parts.append(f"{key}={rendered}")
-    summary = " | ".join(parts)
-    return summary if len(summary) <= 220 else summary[:217] + "..."
-
-
-def _parse_debug_log_line(line: str) -> dict[str, Any] | None:
-    raw = line.strip()
-    if not raw:
-        return None
-    parts = raw.split(" | ")
-    if len(parts) < 3:
-        return None
-    try:
-        timestamp = datetime.fromisoformat(parts[0])
-    except ValueError:
-        return None
-    fields: dict[str, Any] = {}
-    for item in parts[3:]:
-        if "=" not in item:
-            continue
-        key, value = item.split("=", 1)
-        fields[key] = _parse_debug_value(value)
-    return {
-        "raw_line": raw,
-        "timestamp": parts[0],
-        "dt": timestamp,
-        "category": parts[1],
-        "event": parts[2],
-        "fields": fields,
-    }
-
-
-def _latest_debug_session_entries(raw_content: str) -> list[dict[str, Any]]:
-    parsed = [
-        entry
-        for entry in (_parse_debug_log_line(line) for line in raw_content.splitlines())
-        if entry is not None
-    ]
-    if not parsed:
-        return []
-    session_start_index = 0
-    for idx, entry in enumerate(parsed):
-        if entry["category"] == "CALL" and entry["event"] == "session_started":
-            session_start_index = idx
-    return parsed[session_start_index:]
-
-
-def _parse_iso_datetime(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _debug_is_user_stop(entry: dict[str, Any]) -> bool:
-    return (
-        entry["category"] == "TURN"
-        and entry["event"] == "user_state_changed"
-        and str(entry["fields"].get("new_state") or "") == "listening"
-    )
-
-
-def _debug_is_user_committed(entry: dict[str, Any]) -> bool:
-    return entry["category"] == "TRANSCRIPT" and entry["event"] == "USER_COMMITTED"
-
-
-def _debug_is_agent_speaking(entry: dict[str, Any]) -> bool:
-    return (
-        entry["category"] == "AGENT"
-        and entry["event"] == "agent_state_changed"
-        and str(entry["fields"].get("new_state") or "") == "speaking"
-    )
-
-
-def _build_bridge_metrics(timeline: list[dict[str, Any]]) -> dict[str, Any]:
-    bridges: list[dict[str, Any]] = []
-    last_user_committed_index = -1
-
-    for idx, entry in enumerate(timeline):
-        if not _debug_is_user_committed(entry):
-            continue
-
-        speech_end = None
-        for back_idx in range(idx - 1, last_user_committed_index, -1):
-            candidate = timeline[back_idx]
-            if _debug_is_user_stop(candidate):
-                speech_end = candidate
-                break
-
-        agent_speaking = None
-        for forward_idx in range(idx + 1, len(timeline)):
-            candidate = timeline[forward_idx]
-            if _debug_is_agent_speaking(candidate):
-                agent_speaking = candidate
-                break
-            if _debug_is_user_committed(candidate):
-                break
-
-        last_user_committed_index = idx
-        if speech_end is None or agent_speaking is None:
-            continue
-
-        user_text = str(entry["fields"].get("text") or "").strip()
-        speech_end_to_committed_sec = round(entry["elapsed_sec"] - speech_end["elapsed_sec"], 3)
-        committed_to_speaking_sec = round(agent_speaking["elapsed_sec"] - entry["elapsed_sec"], 3)
-        full_bridge_sec = round(agent_speaking["elapsed_sec"] - speech_end["elapsed_sec"], 3)
-        bridges.append(
-            {
-                "turn_number": len(bridges) + 1,
-                "user_text": user_text,
-                "speech_end_elapsed_sec": speech_end["elapsed_sec"],
-                "user_committed_elapsed_sec": entry["elapsed_sec"],
-                "agent_speaking_elapsed_sec": agent_speaking["elapsed_sec"],
-                "speech_end_to_committed_sec": speech_end_to_committed_sec,
-                "committed_to_speaking_sec": committed_to_speaking_sec,
-                "full_bridge_sec": full_bridge_sec,
-            }
-        )
-
-    if not bridges:
-        return {"bridges": [], "summary": {}}
-
-    settle = [item["speech_end_to_committed_sec"] for item in bridges]
-    respond = [item["committed_to_speaking_sec"] for item in bridges]
-    full = [item["full_bridge_sec"] for item in bridges]
-    summary = {
-        "bridge_count": len(bridges),
-        "average_speech_end_to_committed_sec": round(sum(settle) / len(settle), 3),
-        "average_committed_to_speaking_sec": round(sum(respond) / len(respond), 3),
-        "average_full_bridge_sec": round(sum(full) / len(full), 3),
-        "max_full_bridge_sec": round(max(full), 3),
-        "min_full_bridge_sec": round(min(full), 3),
-    }
-    return {"bridges": bridges, "summary": summary}
-
-
-def _build_debug_timeline(path_value: str, max_chars: int = DEBUG_LOG_MAX_CHARS) -> dict[str, Any]:
-    raw_log = _read_log_tail(path_value, max_chars=max_chars)
-    entries = _latest_debug_session_entries(raw_log.get("content", ""))
-    if not entries:
-        return {
-            "log": raw_log,
-            "entries": [],
-            "summary": {},
-        }
-
-    first_dt = entries[0]["dt"]
-    previous_dt = None
-    timeline: list[dict[str, Any]] = []
-    for entry in entries:
-        current_dt = entry["dt"]
-        elapsed_sec = round((current_dt - first_dt).total_seconds(), 3)
-        delta_prev_sec = round((current_dt - previous_dt).total_seconds(), 3) if previous_dt else 0.0
-        previous_dt = current_dt
-        timeline.append(
-            {
-                "timestamp": entry["timestamp"],
-                "category": entry["category"],
-                "event": entry["event"],
-                "elapsed_sec": elapsed_sec,
-                "delta_prev_sec": delta_prev_sec,
-                "fields": entry["fields"],
-                "fields_summary": _summarize_debug_fields(entry["fields"]),
-                "raw_line": entry["raw_line"],
-            }
-        )
-
-    def _first_elapsed(category: str, event: str, field_key: str = "", field_value: str = "") -> float | None:
-        for item in timeline:
-            if item["category"] != category or item["event"] != event:
-                continue
-            if field_key and str(item["fields"].get(field_key, "")) != field_value:
-                continue
-            return item["elapsed_sec"]
-        return None
-
-    bridge_metrics = _build_bridge_metrics(timeline)
-    summary = {
-        "events_count": len(timeline),
-        "session_duration_sec": timeline[-1]["elapsed_sec"],
-        "first_agent_speaking_sec": _first_elapsed("AGENT", "agent_state_changed", "new_state", "speaking"),
-        "first_assistant_committed_sec": _first_elapsed("TRANSCRIPT", "ASSISTANT_COMMITTED"),
-        "first_user_speaking_sec": _first_elapsed("TURN", "user_state_changed", "new_state", "speaking"),
-        "first_user_committed_sec": _first_elapsed("TRANSCRIPT", "USER_COMMITTED"),
-        "first_tool_executed_sec": _first_elapsed("TOOL", "TOOL_EXECUTED"),
-        "shutdown_started_sec": _first_elapsed("CALL", "shutdown_started"),
-        "shutdown_finished_sec": _first_elapsed("CALL", "shutdown_finished"),
-        **bridge_metrics["summary"],
-    }
-
-    raw_log["content"] = "\n".join(item["raw_line"] for item in timeline)
-    return {"log": raw_log, "entries": timeline, "summary": summary, "bridges": bridge_metrics["bridges"]}
-
-
-def _truncate_log(path_value: str) -> dict[str, Any]:
-    path = Path(path_value)
-    if not path.exists():
-        return {"path": str(path), "exists": False, "cleared": False}
-    path.write_text("", encoding="utf-8")
-    return {"path": str(path), "exists": True, "cleared": True}
 
 
 def _flash(request: Request, level: str, message: str) -> None:
@@ -508,10 +256,10 @@ def _recording_match_score(call: Any, recording: dict[str, Any]) -> float | None
 
     call_time = _call_recording_reference_time(call)
     recording_time = (
-        _parse_iso_datetime(recording.get("recording_started_at"))
-        or _parse_iso_datetime(recording.get("created_at"))
-        or _parse_iso_datetime(recording.get("recording_ended_at"))
-        or _parse_iso_datetime(recording.get("updated_at"))
+            parse_iso_datetime(recording.get("recording_started_at"))
+            or parse_iso_datetime(recording.get("created_at"))
+            or parse_iso_datetime(recording.get("recording_ended_at"))
+            or parse_iso_datetime(recording.get("updated_at"))
     )
     if call_time is None or recording_time is None:
         return 0.0
@@ -731,6 +479,7 @@ async def tenant_detail(slug: str, request: Request, db: Session = Depends(get_d
             select(CallEvent).where(CallEvent.tenant_id == tenant.id).order_by(CallEvent.created_at.desc()).limit(30)
         )
     )
+    recent_incoming_event_rows = build_incoming_event_rows(recent_events)
     integration_summary = _integration_summary(db, tenant.id)
     runtime = build_runtime_context(db, tenant) if config else None
     selected_language = normalize_assistant_language((runtime or {}).get("config", {}).get("assistant_language", "en"))
@@ -741,6 +490,7 @@ async def tenant_detail(slug: str, request: Request, db: Session = Depends(get_d
         voice_options = get_cartesia_voice_options(selected_language, selected_voice=selected_voice)
     except Exception as exc:
         voice_error = str(exc)
+    incoming_debug_timeline = build_debug_timeline(AGENT_DEBUG_LOG_PATH)
     return templates.TemplateResponse(
         request,
         "admin/tenant_detail.html",
@@ -755,15 +505,15 @@ async def tenant_detail(slug: str, request: Request, db: Session = Depends(get_d
                 provider: integration_form_payload(get_integration_payload(db, tenant.id, provider))
                 for provider in ("google_calendar", "zoom", "email")
             },
-            "recent_events": recent_events,
+            "recent_events": recent_incoming_event_rows,
             "recent_email_events": _latest_email_events(tenant_id=tenant.id),
             "runtime": runtime,
             "language_choices": supported_assistant_languages(),
             "stt_language_choices": supported_stt_languages(),
             "cartesia_voice_options": voice_options,
             "cartesia_voice_error": voice_error,
-            "agent_debug_log": _read_log_tail(AGENT_DEBUG_LOG_PATH),
-            "agent_runtime_log": _read_log_tail(AGENT_LOG_PATH),
+            "agent_debug_log": incoming_debug_timeline["log"],
+            "incoming_debug_timeline": incoming_debug_timeline,
             "flash": _consume_flash(request),
         },
     )
@@ -779,8 +529,7 @@ async def tenant_debug_log(slug: str, request: Request, db: Session = Depends(ge
         {
             "ok": True,
             "tenant": tenant.slug,
-            "agent_debug_log": _read_log_tail(AGENT_DEBUG_LOG_PATH),
-            "agent_runtime_log": _read_log_tail(AGENT_LOG_PATH),
+            "agent_debug_timeline": build_debug_timeline(AGENT_DEBUG_LOG_PATH),
             "recent_email_events": _latest_email_events(tenant_id=tenant.id),
         }
     )
@@ -795,16 +544,16 @@ async def clear_tenant_log(slug: str, request: Request, db: Session = Depends(ge
     form = await request.form()
     log_type = str(form.get("log_type") or "").strip().lower()
     if log_type == "runtime":
-        _truncate_log(AGENT_LOG_PATH)
+        truncate_log(AGENT_LOG_PATH)
         _flash(request, "success", "Agent runtime log cleared")
     elif log_type == "debug":
-        _truncate_log(AGENT_DEBUG_LOG_PATH)
+        truncate_log(AGENT_DEBUG_LOG_PATH)
         _flash(request, "success", "Live call debug log cleared")
     elif log_type == "outgoing_runtime":
-        _truncate_log(OUTGOING_AGENT_LOG_PATH)
+        truncate_log(OUTGOING_AGENT_LOG_PATH)
         _flash(request, "success", "Outgoing agent runtime log cleared")
     elif log_type == "outgoing_debug":
-        _truncate_log(OUTGOING_AGENT_DEBUG_LOG_PATH)
+        truncate_log(OUTGOING_AGENT_DEBUG_LOG_PATH)
         _flash(request, "success", "Outgoing call debug log cleared")
     else:
         _flash(request, "error", "Unknown log type")
@@ -845,7 +594,7 @@ async def tenant_outgoing_detail(
     for batch in recent_bulk_batches:
         refresh_bulk_batch_counts(outgoing_db, batch)
     outgoing_prompt_tools = list_outgoing_prompt_tools(outgoing_db, tenant.id)
-    outgoing_debug_timeline = _build_debug_timeline(OUTGOING_AGENT_DEBUG_LOG_PATH)
+    outgoing_debug_timeline = build_debug_timeline(OUTGOING_AGENT_DEBUG_LOG_PATH)
     return templates.TemplateResponse(
         request,
         "admin/outgoing_calls.html",
@@ -889,7 +638,7 @@ async def outgoing_debug_log(
     tenant = get_tenant_by_slug(db, slug)
     if tenant is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    outgoing_debug_timeline = _build_debug_timeline(OUTGOING_AGENT_DEBUG_LOG_PATH)
+    outgoing_debug_timeline = build_debug_timeline(OUTGOING_AGENT_DEBUG_LOG_PATH)
     return JSONResponse(
         {
             "ok": True,
@@ -923,6 +672,7 @@ async def save_outgoing_config(
         "tts_speed": form.get("tts_speed"),
         "min_endpointing_delay": form.get("min_endpointing_delay"),
         "max_endpointing_delay": form.get("max_endpointing_delay"),
+        "interruption_min_words": normalize_interruption_min_words(form.get("interruption_min_words"), default=3),
         "opening_phrase": str(form.get("opening_phrase") or "").strip(),
         "system_prompt": str(form.get("system_prompt") or "").strip(),
         "caller_display_name": str(form.get("caller_display_name") or tenant.display_name).strip(),
@@ -1292,6 +1042,8 @@ async def update_tenant_config(slug: str, request: Request, db: Session = Depend
     except json.JSONDecodeError:
         _flash(request, "error", "Extra settings must be valid JSON")
         return RedirectResponse(url=f"/admin/tenants/{slug}", status_code=303)
+    extra_settings = dict(extra_settings or {})
+    extra_settings["interruption_min_words"] = normalize_interruption_min_words(form.get("interruption_min_words"), default=3)
 
     payload = {
         "business_name": str(form.get("business_name") or tenant.display_name).strip(),

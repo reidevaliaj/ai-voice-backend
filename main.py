@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import base64
 import json
@@ -35,6 +36,7 @@ from services.tenants import (
     get_tenant_by_id,
     get_tenant_by_slug,
     normalize_phone_number,
+    resolve_tenant_by_call_sid,
     resolve_tenant_by_number,
 )
 
@@ -96,6 +98,10 @@ def _public_url(path: str) -> str:
 def _telnyx_webhook_url() -> str:
     path = TELNYX_VOICE_WEBHOOK_PATH if TELNYX_VOICE_WEBHOOK_PATH.startswith("/") else f"/{TELNYX_VOICE_WEBHOOK_PATH}"
     return _public_url(path)
+
+
+def _twilio_incoming_recording_status_url() -> str:
+    return _public_url("/incoming/twilio/recording-status")
 
 
 def _telnyx_transport_protocol(sip_uri: str) -> str:
@@ -280,31 +286,50 @@ async def _handle_telnyx_voice_webhook(wrapper: dict):
             "webhook_url_method": "POST",
         },
     )
-    await _post_telnyx_command(
-        call_control_id,
-        "transfer",
-        {
-            "to": LIVEKIT_SIP_URI,
-            "timeout_secs": 20,
-            "sip_auth_username": LIVEKIT_SIP_USERNAME,
-            "sip_auth_password": LIVEKIT_SIP_PASSWORD,
-            "sip_transport_protocol": _telnyx_transport_protocol(LIVEKIT_SIP_URI),
-            "command_id": _telnyx_command_id("transfer", call_control_id),
-            "client_state": client_state,
-            "target_leg_client_state": client_state,
-            "webhook_url": webhook_url,
-            "webhook_url_method": "POST",
-            "custom_headers": [
-                {"name": "X-Tenant-Id", "value": tenant_id},
-                {"name": "X-Tenant-Slug", "value": tenant_slug},
-                {"name": "X-Config-Version", "value": config_version},
-                {"name": "X-Called-Number", "value": called_number},
-                {"name": "X-Caller-Number", "value": caller_number},
-                {"name": "X-Parent-Call-Sid", "value": call_control_id},
-                {"name": "X-Call-Provider", "value": "telnyx"},
-            ],
-        },
+    record_result, transfer_result = await asyncio.gather(
+        _post_telnyx_command(
+            call_control_id,
+            "record_start",
+            {
+                "format": "mp3",
+                "channels": "single",
+                "command_id": _telnyx_command_id("record-start", call_control_id),
+                "client_state": client_state,
+                "webhook_url": webhook_url,
+                "webhook_url_method": "POST",
+            },
+        ),
+        _post_telnyx_command(
+            call_control_id,
+            "transfer",
+            {
+                "to": LIVEKIT_SIP_URI,
+                "timeout_secs": 20,
+                "sip_auth_username": LIVEKIT_SIP_USERNAME,
+                "sip_auth_password": LIVEKIT_SIP_PASSWORD,
+                "sip_transport_protocol": _telnyx_transport_protocol(LIVEKIT_SIP_URI),
+                "command_id": _telnyx_command_id("transfer", call_control_id),
+                "client_state": client_state,
+                "target_leg_client_state": client_state,
+                "webhook_url": webhook_url,
+                "webhook_url_method": "POST",
+                "custom_headers": [
+                    {"name": "X-Tenant-Id", "value": tenant_id},
+                    {"name": "X-Tenant-Slug", "value": tenant_slug},
+                    {"name": "X-Config-Version", "value": config_version},
+                    {"name": "X-Called-Number", "value": called_number},
+                    {"name": "X-Caller-Number", "value": caller_number},
+                    {"name": "X-Parent-Call-Sid", "value": call_control_id},
+                    {"name": "X-Call-Provider", "value": "telnyx"},
+                ],
+            },
+        ),
+        return_exceptions=True,
     )
+    if isinstance(record_result, Exception):
+        logger.warning("[TELNYX] record_start failed call_control_id=%s error=%s", call_control_id, record_result)
+    if isinstance(transfer_result, Exception):
+        raise transfer_result
     return JSONResponse({"ok": True, "handled": "answer_transfer", "tenant": tenant_slug})
 
 
@@ -367,7 +392,13 @@ async def incoming_call(request: Request):
     )
 
     vr = VoiceResponse()
-    dial = vr.dial(answer_on_bridge=True, timeout=20)
+    dial = vr.dial(
+        answer_on_bridge=True,
+        timeout=20,
+        record="record-from-answer-dual",
+        recording_status_callback=_twilio_incoming_recording_status_url(),
+        recording_status_callback_method="POST",
+    )
     dial.sip(
         sip_uri,
         username=LIVEKIT_SIP_USERNAME,
@@ -388,6 +419,18 @@ async def sip_status(request: Request):
         tenant = resolve_tenant_by_number(session, called_number)
         log_call_event(session, event_type="sip_status", payload=payload, tenant=tenant)
     logger.info(">>> SIP STATUS: %s", payload)
+    return Response("OK")
+
+
+@app.post("/incoming/twilio/recording-status")
+async def twilio_incoming_recording_status(request: Request):
+    form = await request.form()
+    payload = dict(form)
+    call_sid = str(payload.get("CallSid") or "")
+    with db_session() as session:
+        tenant = resolve_tenant_by_call_sid(session, call_sid)
+        log_call_event(session, event_type="twilio_recording_status", payload=payload, tenant=tenant)
+    logger.info(">>> TWILIO RECORDING STATUS: %s", payload)
     return Response("OK")
 
 

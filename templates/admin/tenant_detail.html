@@ -87,6 +87,11 @@
         <input type="number" name="max_endpointing_delay" min="0.1" max="6.0" step="0.05" value="{{ config_form.max_endpointing_delay }}" />
         <p class="muted">Suggested faster phone cap: 1.20 seconds.</p>
       </div>
+      <div>
+        <label>Interruption Min Words</label>
+        <input type="number" name="interruption_min_words" min="0" max="12" step="1" value="{{ config_form.interruption_min_words }}" />
+        <p class="muted">Require at least this many caller words before the assistant can be interrupted while it is speaking.</p>
+      </div>
     </div>
     <div>
       <label>Greeting</label>
@@ -246,32 +251,89 @@
 </section>
 
 <section class="panel" style="margin-top: 18px;">
-  <h2>Runtime Snapshot</h2>
-  {% if runtime %}
-  <pre>{{ runtime | tojson(indent=2) }}</pre>
-  {% else %}
-  <p class="muted">No runtime config available.</p>
-  {% endif %}
+  <h2>Incoming Call Timing</h2>
+  <p class="muted">Calculated from the latest incoming debug session so you can see elapsed seconds, bridges, and event deltas.</p>
+  <div class="actions" style="margin-bottom: 10px;">
+    <button type="button" id="refresh-incoming-debug" class="secondary">Refresh Debug Once</button>
+  </div>
+  <div id="incoming-debug-summary" class="muted" style="margin-bottom: 10px;">
+    {% if incoming_debug_timeline.summary %}
+      <div>Total session: <code>{{ incoming_debug_timeline.summary.session_duration_sec }}</code>s</div>
+      <div>First AI speaking: <code>{{ incoming_debug_timeline.summary.first_agent_speaking_sec if incoming_debug_timeline.summary.first_agent_speaking_sec is not none else '-' }}</code>s</div>
+      <div>Opening committed: <code>{{ incoming_debug_timeline.summary.first_assistant_committed_sec if incoming_debug_timeline.summary.first_assistant_committed_sec is not none else '-' }}</code>s</div>
+      <div>First user speaking: <code>{{ incoming_debug_timeline.summary.first_user_speaking_sec if incoming_debug_timeline.summary.first_user_speaking_sec is not none else '-' }}</code>s</div>
+      <div>First user committed: <code>{{ incoming_debug_timeline.summary.first_user_committed_sec if incoming_debug_timeline.summary.first_user_committed_sec is not none else '-' }}</code>s</div>
+      <div>First tool executed: <code>{{ incoming_debug_timeline.summary.first_tool_executed_sec if incoming_debug_timeline.summary.first_tool_executed_sec is not none else '-' }}</code>s</div>
+      <div>Bridges detected: <code>{{ incoming_debug_timeline.summary.bridge_count if incoming_debug_timeline.summary.bridge_count is not none else '-' }}</code></div>
+      <div>Average full bridge: <code>{{ incoming_debug_timeline.summary.average_full_bridge_sec if incoming_debug_timeline.summary.average_full_bridge_sec is not none else '-' }}</code>s</div>
+      <div>Average stop -> commit: <code>{{ incoming_debug_timeline.summary.average_speech_end_to_committed_sec if incoming_debug_timeline.summary.average_speech_end_to_committed_sec is not none else '-' }}</code>s</div>
+      <div>Average commit -> AI speaking: <code>{{ incoming_debug_timeline.summary.average_committed_to_speaking_sec if incoming_debug_timeline.summary.average_committed_to_speaking_sec is not none else '-' }}</code>s</div>
+    {% else %}
+      <div>No parsed timing session yet.</div>
+    {% endif %}
+  </div>
+  <div style="overflow-x: auto; margin-bottom: 14px;">
+    <table id="incoming-bridge-table">
+      <thead>
+        <tr>
+          <th>Turn</th>
+          <th>User Text</th>
+          <th>Stop -> Commit (s)</th>
+          <th>Commit -> AI Speaking (s)</th>
+          <th>Full Bridge (s)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for bridge in incoming_debug_timeline.bridges %}
+        <tr>
+          <td><code>{{ bridge.turn_number }}</code></td>
+          <td>{{ bridge.user_text or "-" }}</td>
+          <td><code>{{ bridge.speech_end_to_committed_sec }}</code></td>
+          <td><code>{{ bridge.committed_to_speaking_sec }}</code></td>
+          <td><code>{{ bridge.full_bridge_sec }}</code></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">No bridges detected yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div style="overflow-x: auto;">
+    <table id="incoming-debug-timeline-table">
+      <thead>
+        <tr>
+          <th>Elapsed (s)</th>
+          <th>Delta (s)</th>
+          <th>Category</th>
+          <th>Event</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for entry in incoming_debug_timeline.entries %}
+        <tr>
+          <td><code>{{ entry.elapsed_sec }}</code></td>
+          <td><code>{{ entry.delta_prev_sec }}</code></td>
+          <td>{{ entry.category }}</td>
+          <td>{{ entry.event }}</td>
+          <td>{{ entry.fields_summary }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">No parsed timing events yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </section>
 
 <section class="panel" style="margin-top: 18px;">
-  <h2>Live Call Debug</h2>
-  <p class="muted">Auto-refreshes while you keep this page open. Source: <code id="agent-debug-path">{{ agent_debug_log.path }}</code></p>
+  <h2>Incoming Call Debug</h2>
+  <p class="muted">Source: <code id="agent-debug-path">{{ agent_debug_log.path }}</code></p>
   <form method="post" action="/admin/tenants/{{ tenant.slug }}/clear-log" class="actions" style="margin-bottom: 10px;">
     <input type="hidden" name="log_type" value="debug" />
-    <button type="submit" class="secondary">Clear Live Debug Log</button>
+    <button type="submit" class="secondary">Clear Incoming Debug Log</button>
   </form>
   <pre id="agent-debug-log">{{ agent_debug_log.content or 'No live debug log content yet.' }}</pre>
-</section>
-
-<section class="panel" style="margin-top: 18px;">
-  <h2>Agent Runtime Log</h2>
-  <p class="muted">Useful if the worker itself has startup or runtime issues. Source: <code id="agent-runtime-path">{{ agent_runtime_log.path }}</code></p>
-  <form method="post" action="/admin/tenants/{{ tenant.slug }}/clear-log" class="actions" style="margin-bottom: 10px;">
-    <input type="hidden" name="log_type" value="runtime" />
-    <button type="submit" class="secondary">Clear Agent Runtime Log</button>
-  </form>
-  <pre id="agent-runtime-log">{{ agent_runtime_log.content or 'No agent runtime log content yet.' }}</pre>
 </section>
 
 <section class="panel" style="margin-top: 18px;">
@@ -290,26 +352,38 @@
       <tr>
         <th>Created</th>
         <th>Type</th>
+        <th>Provider</th>
         <th>Call SID</th>
         <th>Status</th>
+        <th>Recording</th>
         <th>Room</th>
         <th>Caller</th>
         <th>Called</th>
       </tr>
     </thead>
     <tbody>
-      {% for event in recent_events %}
+      {% for row in recent_events %}
       <tr>
-        <td>{{ event.created_at }}</td>
-        <td>{{ event.event_type }}</td>
-        <td><code>{{ event.call_sid or event.parent_call_sid }}</code></td>
-        <td>{{ event.call_status }}</td>
-        <td>{{ event.room_name }}</td>
-        <td>{{ event.caller_number }}</td>
-        <td>{{ event.called_number }}</td>
+        <td>{{ row.event.created_at }}</td>
+        <td>{{ row.event.event_type }}</td>
+        <td>{{ row.provider }}</td>
+        <td><code>{{ row.event.call_sid or row.event.parent_call_sid }}</code></td>
+        <td>{{ row.event.call_status }}</td>
+        <td>
+          {% if row.recording_urls.get("mp3") %}
+          <a href="{{ row.recording_urls.get('mp3') }}" target="_blank" rel="noreferrer">mp3</a>
+          {% elif row.recording_urls.get("wav") %}
+          <a href="{{ row.recording_urls.get('wav') }}" target="_blank" rel="noreferrer">wav</a>
+          {% else %}
+          <span class="muted">-</span>
+          {% endif %}
+        </td>
+        <td>{{ row.event.room_name }}</td>
+        <td>{{ row.event.caller_number }}</td>
+        <td>{{ row.event.called_number }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="7" class="muted">No call events yet.</td></tr>
+      <tr><td colspan="9" class="muted">No call events yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -319,31 +393,112 @@
   (function () {
     const debugUrl = "/admin/tenants/{{ tenant.slug }}/debug-log";
     const debugLog = document.getElementById("agent-debug-log");
-    const runtimeLog = document.getElementById("agent-runtime-log");
     const emailEvents = document.getElementById("recent-email-events");
     const debugPath = document.getElementById("agent-debug-path");
-    const runtimePath = document.getElementById("agent-runtime-path");
+    const debugSummary = document.getElementById("incoming-debug-summary");
+    const bridgeTableBody = document.querySelector("#incoming-bridge-table tbody");
+    const timelineTableBody = document.querySelector("#incoming-debug-timeline-table tbody");
+    const refreshDebugButton = document.getElementById("refresh-incoming-debug");
     const languageSelect = document.getElementById("assistant-language-select");
     const sttSelect = document.getElementById("stt-language-select");
     const voiceSelect = document.getElementById("tts-voice-select");
     const voiceStatus = document.getElementById("tts-voice-status");
     let sttTouched = false;
+    let refreshInFlight = false;
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function renderDebugSummary(summary) {
+      if (!debugSummary) {
+        return;
+      }
+      if (!summary || !Object.keys(summary).length) {
+        debugSummary.innerHTML = "<div>No parsed timing session yet.</div>";
+        return;
+      }
+      const value = (item) => (item === null || item === undefined || item === "" ? "-" : item);
+      debugSummary.innerHTML = `
+        <div>Total session: <code>${escapeHtml(value(summary.session_duration_sec))}</code>s</div>
+        <div>First AI speaking: <code>${escapeHtml(value(summary.first_agent_speaking_sec))}</code>s</div>
+        <div>Opening committed: <code>${escapeHtml(value(summary.first_assistant_committed_sec))}</code>s</div>
+        <div>First user speaking: <code>${escapeHtml(value(summary.first_user_speaking_sec))}</code>s</div>
+        <div>First user committed: <code>${escapeHtml(value(summary.first_user_committed_sec))}</code>s</div>
+        <div>First tool executed: <code>${escapeHtml(value(summary.first_tool_executed_sec))}</code>s</div>
+        <div>Bridges detected: <code>${escapeHtml(value(summary.bridge_count))}</code></div>
+        <div>Average full bridge: <code>${escapeHtml(value(summary.average_full_bridge_sec))}</code>s</div>
+        <div>Average stop -> commit: <code>${escapeHtml(value(summary.average_speech_end_to_committed_sec))}</code>s</div>
+        <div>Average commit -> AI speaking: <code>${escapeHtml(value(summary.average_committed_to_speaking_sec))}</code>s</div>
+      `;
+    }
+
+    function renderBridges(bridges) {
+      if (!bridgeTableBody) {
+        return;
+      }
+      const rows = Array.isArray(bridges) ? bridges : [];
+      if (!rows.length) {
+        bridgeTableBody.innerHTML = '<tr><td colspan="5" class="muted">No bridges detected yet.</td></tr>';
+        return;
+      }
+      bridgeTableBody.innerHTML = rows.map((bridge) => `
+        <tr>
+          <td><code>${escapeHtml(bridge.turn_number)}</code></td>
+          <td>${escapeHtml(bridge.user_text || "-")}</td>
+          <td><code>${escapeHtml(bridge.speech_end_to_committed_sec)}</code></td>
+          <td><code>${escapeHtml(bridge.committed_to_speaking_sec)}</code></td>
+          <td><code>${escapeHtml(bridge.full_bridge_sec)}</code></td>
+        </tr>
+      `).join("");
+    }
+
+    function renderTimeline(entries) {
+      if (!timelineTableBody) {
+        return;
+      }
+      const rows = Array.isArray(entries) ? entries : [];
+      if (!rows.length) {
+        timelineTableBody.innerHTML = '<tr><td colspan="5" class="muted">No parsed timing events yet.</td></tr>';
+        return;
+      }
+      timelineTableBody.innerHTML = rows.map((entry) => `
+        <tr>
+          <td><code>${escapeHtml(entry.elapsed_sec)}</code></td>
+          <td><code>${escapeHtml(entry.delta_prev_sec)}</code></td>
+          <td>${escapeHtml(entry.category || "")}</td>
+          <td>${escapeHtml(entry.event || "")}</td>
+          <td>${escapeHtml(entry.fields_summary || "")}</td>
+        </tr>
+      `).join("");
+    }
 
     async function refreshDebug() {
+      if (refreshInFlight) {
+        return;
+      }
+      refreshInFlight = true;
+      if (refreshDebugButton) {
+        refreshDebugButton.disabled = true;
+      }
       try {
         const response = await fetch(debugUrl, { headers: { "X-Requested-With": "fetch" } });
         if (!response.ok) {
           return;
         }
         const payload = await response.json();
-        if (payload.agent_debug_log) {
-          debugLog.textContent = payload.agent_debug_log.content || "No live debug log content yet.";
-          debugPath.textContent = payload.agent_debug_log.path || "";
-        }
-        if (payload.agent_runtime_log) {
-          runtimeLog.textContent = payload.agent_runtime_log.content || "No agent runtime log content yet.";
-          runtimePath.textContent = payload.agent_runtime_log.path || "";
-        }
+        const timeline = payload.agent_debug_timeline || {};
+        const debugPayload = timeline.log || {};
+        debugLog.textContent = debugPayload.content || "No live debug log content yet.";
+        debugPath.textContent = debugPayload.path || "";
+        renderDebugSummary(timeline.summary || {});
+        renderBridges(timeline.bridges || []);
+        renderTimeline(timeline.entries || []);
         if (payload.recent_email_events) {
           emailEvents.textContent = payload.recent_email_events.length
             ? JSON.stringify(payload.recent_email_events, null, 2)
@@ -351,6 +506,11 @@
         }
       } catch (error) {
         console.error("Failed to refresh debug log", error);
+      } finally {
+        refreshInFlight = false;
+        if (refreshDebugButton) {
+          refreshDebugButton.disabled = false;
+        }
       }
     }
 
@@ -417,39 +577,7 @@
     voiceSelect.addEventListener("change", () => {
       voiceSelect.dataset.selectedVoice = voiceSelect.value || "";
     });
-
-    const refreshIntervalMs = 10000;
-    let refreshHandle = null;
-
-    function startRefreshLoop() {
-      if (refreshHandle !== null) {
-        return;
-      }
-      refreshHandle = setInterval(() => {
-        if (!document.hidden) {
-          refreshDebug();
-        }
-      }, refreshIntervalMs);
-    }
-
-    function stopRefreshLoop() {
-      if (refreshHandle === null) {
-        return;
-      }
-      clearInterval(refreshHandle);
-      refreshHandle = null;
-    }
-
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) {
-        stopRefreshLoop();
-        return;
-      }
-      refreshDebug();
-      startRefreshLoop();
-    });
-
-    startRefreshLoop();
+    refreshDebugButton?.addEventListener("click", refreshDebug);
     syncSttLanguage();
     refreshVoices();
   })();

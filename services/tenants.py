@@ -90,6 +90,7 @@ SUPPORTED_STT_LANGUAGES: tuple[tuple[str, str], ...] = (
     ("multi", "Automatic multilingual"),
 )
 SUPPORTED_STT_LANGUAGE_MAP = {code: label for code, label in SUPPORTED_STT_LANGUAGES}
+DEFAULT_INTERRUPTION_MIN_WORDS = 3
 
 
 def normalize_assistant_language(value: str | None) -> str:
@@ -144,6 +145,14 @@ def normalize_tts_speed(value: Any) -> float:
     return min(1.5, max(0.6, speed))
 
 
+def normalize_interruption_min_words(value: Any, *, default: int = DEFAULT_INTERRUPTION_MIN_WORDS) -> int:
+    try:
+        word_count = int(value if value not in (None, "") else default)
+    except (TypeError, ValueError):
+        word_count = default
+    return min(12, max(0, word_count))
+
+
 def default_tenant_prompt(display_name: str) -> str:
     business = (display_name or "the business").strip() or "the business"
     return (
@@ -191,6 +200,7 @@ def default_config_payload(display_name: str = "Code Studio") -> dict[str, Any]:
         "extra_settings": {
             "meeting_owner_email": DEFAULT_MEETING_OWNER_EMAIL,
             "cartesia_voice_source": "platform_default" if not CARTESIA_API_KEY else "cartesia_api",
+            "interruption_min_words": DEFAULT_INTERRUPTION_MIN_WORDS,
             "call_types": [
                 "sales_lead",
                 "support_issue",
@@ -244,6 +254,23 @@ def resolve_tenant_by_recent_caller(session: Session, caller_id: str | None, min
     stmt = (
         select(CallEvent)
         .where(CallEvent.caller_number == normalized, CallEvent.created_at >= threshold)
+        .order_by(CallEvent.created_at.desc())
+    )
+    event = session.scalars(stmt).first()
+    if event and event.tenant_id:
+        return get_tenant_by_id(session, event.tenant_id)
+    return None
+
+
+def resolve_tenant_by_call_sid(session: Session, call_sid: str | None) -> Tenant | None:
+    from models import CallEvent
+
+    normalized = str(call_sid or "").strip()
+    if not normalized:
+        return None
+    stmt = (
+        select(CallEvent)
+        .where((CallEvent.call_sid == normalized) | (CallEvent.parent_call_sid == normalized))
         .order_by(CallEvent.created_at.desc())
     )
     event = session.scalars(stmt).first()
@@ -453,6 +480,9 @@ def build_runtime_context(session: Session, tenant: Tenant, config_version: int 
             "from_email": config.from_email,
             "notification_targets": list(config.notification_targets or []),
             "extra_settings": dict(config.extra_settings or {}),
+            "interruption_min_words": normalize_interruption_min_words(
+                (config.extra_settings or {}).get("interruption_min_words")
+            ),
         },
         "integrations": integrations,
     }
@@ -598,7 +628,11 @@ def seed_default_tenant(session: Session) -> Tenant:
 
 def config_form_payload(config: TenantAgentConfig | None) -> dict[str, Any]:
     if config is None:
-        return default_config_payload()
+        payload = default_config_payload()
+        payload["interruption_min_words"] = normalize_interruption_min_words(
+            (payload.get("extra_settings") or {}).get("interruption_min_words")
+        )
+        return payload
     min_endpointing_delay, max_endpointing_delay = normalize_endpointing_window(
         config.min_endpointing_delay,
         config.max_endpointing_delay,
@@ -621,6 +655,7 @@ def config_form_payload(config: TenantAgentConfig | None) -> dict[str, Any]:
         "llm_model": config.llm_model,
         "min_endpointing_delay": min_endpointing_delay,
         "max_endpointing_delay": max_endpointing_delay,
+        "interruption_min_words": normalize_interruption_min_words((config.extra_settings or {}).get("interruption_min_words")),
         "tts_voice": config.tts_voice,
         "tts_speed": normalize_tts_speed(config.tts_speed),
         "owner_name": config.owner_name,

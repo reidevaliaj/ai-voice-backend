@@ -7,7 +7,15 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
-from app_config import TWILIO_ACCOUNT_SID, TWILIO_API_BASE_URL, TWILIO_AUTH_TOKEN
+from app_config import (
+    TWILIO_ACCOUNT_SID,
+    TWILIO_API_BASE_URL,
+    TWILIO_AUTH_TOKEN,
+    TWILIO_IE1_ACCOUNT_SID,
+    TWILIO_IE1_AUTH_TOKEN,
+    TWILIO_IE1_API_KEY_SECRET,
+    TWILIO_IE1_API_KEY_SID,
+)
 
 logger = logging.getLogger("twilio")
 
@@ -16,6 +24,21 @@ def _twilio_auth() -> tuple[str, str]:
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
         raise RuntimeError("TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is not configured")
     return TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
+
+
+def _twilio_auth_for_host(hostname: str) -> tuple[str, str]:
+    host = str(hostname or "").strip().lower()
+    if host.endswith(".ie1.twilio.com"):
+        if TWILIO_IE1_API_KEY_SID and TWILIO_IE1_API_KEY_SECRET:
+            return TWILIO_IE1_API_KEY_SID, TWILIO_IE1_API_KEY_SECRET
+        if TWILIO_IE1_ACCOUNT_SID and TWILIO_IE1_AUTH_TOKEN:
+            return TWILIO_IE1_ACCOUNT_SID, TWILIO_IE1_AUTH_TOKEN
+        raise RuntimeError(
+            "This Twilio recording is stored in the IE1 region. "
+            "Configure TWILIO_IE1_API_KEY_SID and TWILIO_IE1_API_KEY_SECRET, "
+            "or TWILIO_IE1_ACCOUNT_SID and TWILIO_IE1_AUTH_TOKEN."
+        )
+    return _twilio_auth()
 
 
 def normalize_recording_media_url(recording_url: str, format_hint: str = "") -> str:
@@ -45,10 +68,11 @@ def normalize_recording_media_url(recording_url: str, format_hint: str = "") -> 
 
 
 async def fetch_recording_media(recording_url: str, format_hint: str = "") -> tuple[bytes, str]:
-    account_sid, auth_token = _twilio_auth()
     url = normalize_recording_media_url(recording_url, format_hint=format_hint)
+    parsed = urlparse(url)
+    username, password = _twilio_auth_for_host(parsed.hostname or "")
     timeout = httpx.Timeout(30.0, connect=8.0)
-    async with httpx.AsyncClient(timeout=timeout, auth=(account_sid, auth_token), follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=timeout, auth=(username, password), follow_redirects=True) as client:
         response = await client.get(url, headers={"Accept": "*/*"})
         if response.is_error:
             detail = _extract_twilio_error(response)

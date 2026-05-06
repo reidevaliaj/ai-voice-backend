@@ -370,7 +370,11 @@
         <td><code>{{ row.event.call_sid or row.event.parent_call_sid }}</code></td>
         <td>{{ row.event.call_status }}</td>
         <td>
-          {% if row.recording_urls.get("mp3") %}
+          {% if row.provider == "twilio" and row.recording_urls.get("mp3") %}
+          <a href="{{ twilio_recording_proxy_url(row.recording_urls.get('mp3'), 'mp3') }}" target="_blank" rel="noreferrer">mp3</a>
+          {% elif row.provider == "twilio" and row.recording_urls.get("wav") %}
+          <a href="{{ twilio_recording_proxy_url(row.recording_urls.get('wav'), 'wav') }}" target="_blank" rel="noreferrer">wav</a>
+          {% elif row.recording_urls.get("mp3") %}
           <a href="{{ row.recording_urls.get('mp3') }}" target="_blank" rel="noreferrer">mp3</a>
           {% elif row.recording_urls.get("wav") %}
           <a href="{{ row.recording_urls.get('wav') }}" target="_blank" rel="noreferrer">wav</a>

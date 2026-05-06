@@ -4,9 +4,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -109,6 +110,7 @@ from services.tenants import (
     upsert_phone_number,
 )
 from services.twilio_voice import dial_call as twilio_dial_call
+from services.twilio_voice import fetch_recording_media as twilio_fetch_recording_media
 from services.twilio_voice import hangup_call as twilio_hangup_call
 from tools.email_resend import send_email_resend
 from tools.google_calendar import CalendarContext, validate_calendar_context
@@ -144,6 +146,13 @@ def _flash(request: Request, level: str, message: str) -> None:
 
 def _consume_flash(request: Request) -> dict[str, str] | None:
     return request.session.pop("flash", None)
+
+
+def _twilio_recording_proxy_url(recording_url: str, format_hint: str = "") -> str:
+    query = {"url": str(recording_url or "").strip()}
+    if format_hint:
+        query["format"] = format_hint
+    return f"/admin/twilio/recording-media?{urlencode(query)}"
 
 
 def _current_admin(request: Request, session: Session) -> AdminUser | None:
@@ -419,6 +428,24 @@ async def admin_home(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/admin/twilio/recording-media")
+async def admin_twilio_recording_media(
+    request: Request,
+    url: str = "",
+    format: str = "",
+    db: Session = Depends(get_db),
+):
+    require_admin(request, db)
+    try:
+        media_bytes, content_type = await twilio_fetch_recording_media(url, format_hint=str(format or "").strip().lower())
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not fetch Twilio recording: {exc}") from exc
+
+    extension = "mp3" if str(format or "").strip().lower() == "mp3" else "wav"
+    headers = {"Content-Disposition": f'inline; filename="twilio-recording.{extension}"'}
+    return Response(content=media_bytes, media_type=content_type, headers=headers)
+
+
 @router.post("/admin/tenants")
 async def create_tenant_action(request: Request, db: Session = Depends(get_db)):
     require_admin(request, db)
@@ -514,6 +541,7 @@ async def tenant_detail(slug: str, request: Request, db: Session = Depends(get_d
             "cartesia_voice_error": voice_error,
             "agent_debug_log": incoming_debug_timeline["log"],
             "incoming_debug_timeline": incoming_debug_timeline,
+            "twilio_recording_proxy_url": _twilio_recording_proxy_url,
             "flash": _consume_flash(request),
         },
     )

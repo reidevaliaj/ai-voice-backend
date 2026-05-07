@@ -1112,6 +1112,7 @@ async def update_tenant_config(slug: str, request: Request, db: Session = Depend
         return RedirectResponse(url=f"/admin/tenants/{slug}", status_code=303)
     extra_settings = dict(extra_settings or {})
     extra_settings["interruption_min_words"] = normalize_interruption_min_words(form.get("interruption_min_words"), default=3)
+    extra_settings["incoming_bridge_filler_enabled"] = form.get("incoming_bridge_filler_enabled") == "on"
 
     payload = {
         "business_name": str(form.get("business_name") or tenant.display_name).strip(),

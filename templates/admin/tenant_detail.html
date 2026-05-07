@@ -92,6 +92,13 @@
         <input type="number" name="interruption_min_words" min="0" max="12" step="1" value="{{ config_form.interruption_min_words }}" />
         <p class="muted">Require at least this many caller words before the assistant can be interrupted while it is speaking.</p>
       </div>
+      <div>
+        <label>Incoming Bridge Filler</label>
+        <div class="checkboxes" style="margin-top: 10px;">
+          <label><input type="checkbox" name="incoming_bridge_filler_enabled" {% if config_form.incoming_bridge_filler_enabled %}checked{% endif %} /> Enable bridge filler for this tenant</label>
+        </div>
+        <p class="muted">Incoming only. When enabled, the assistant can say a short filler phrase during the response bridge.</p>
+      </div>
     </div>
     <div>
       <label>Greeting</label>

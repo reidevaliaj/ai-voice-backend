@@ -91,6 +91,7 @@ SUPPORTED_STT_LANGUAGES: tuple[tuple[str, str], ...] = (
 )
 SUPPORTED_STT_LANGUAGE_MAP = {code: label for code, label in SUPPORTED_STT_LANGUAGES}
 DEFAULT_INTERRUPTION_MIN_WORDS = 3
+DEFAULT_INCOMING_BRIDGE_FILLER_ENABLED = False
 
 
 def normalize_assistant_language(value: str | None) -> str:
@@ -201,6 +202,7 @@ def default_config_payload(display_name: str = "Code Studio") -> dict[str, Any]:
             "meeting_owner_email": DEFAULT_MEETING_OWNER_EMAIL,
             "cartesia_voice_source": "platform_default" if not CARTESIA_API_KEY else "cartesia_api",
             "interruption_min_words": DEFAULT_INTERRUPTION_MIN_WORDS,
+            "incoming_bridge_filler_enabled": DEFAULT_INCOMING_BRIDGE_FILLER_ENABLED,
             "call_types": [
                 "sales_lead",
                 "support_issue",
@@ -483,6 +485,12 @@ def build_runtime_context(session: Session, tenant: Tenant, config_version: int 
             "interruption_min_words": normalize_interruption_min_words(
                 (config.extra_settings or {}).get("interruption_min_words")
             ),
+            "incoming_bridge_filler_enabled": bool(
+                (config.extra_settings or {}).get(
+                    "incoming_bridge_filler_enabled",
+                    DEFAULT_INCOMING_BRIDGE_FILLER_ENABLED,
+                )
+            ),
         },
         "integrations": integrations,
     }
@@ -632,6 +640,12 @@ def config_form_payload(config: TenantAgentConfig | None) -> dict[str, Any]:
         payload["interruption_min_words"] = normalize_interruption_min_words(
             (payload.get("extra_settings") or {}).get("interruption_min_words")
         )
+        payload["incoming_bridge_filler_enabled"] = bool(
+            (payload.get("extra_settings") or {}).get(
+                "incoming_bridge_filler_enabled",
+                DEFAULT_INCOMING_BRIDGE_FILLER_ENABLED,
+            )
+        )
         return payload
     min_endpointing_delay, max_endpointing_delay = normalize_endpointing_window(
         config.min_endpointing_delay,
@@ -656,6 +670,9 @@ def config_form_payload(config: TenantAgentConfig | None) -> dict[str, Any]:
         "min_endpointing_delay": min_endpointing_delay,
         "max_endpointing_delay": max_endpointing_delay,
         "interruption_min_words": normalize_interruption_min_words((config.extra_settings or {}).get("interruption_min_words")),
+        "incoming_bridge_filler_enabled": bool(
+            (config.extra_settings or {}).get("incoming_bridge_filler_enabled", DEFAULT_INCOMING_BRIDGE_FILLER_ENABLED)
+        ),
         "tts_voice": config.tts_voice,
         "tts_speed": normalize_tts_speed(config.tts_speed),
         "owner_name": config.owner_name,

@@ -225,6 +225,15 @@
       </p>
       <p class="muted">Last validated: {{ summary.last_validated_at or 'never' }}</p>
       {% if summary.last_error %}<p class="muted">Last error: {{ summary.last_error }}</p>{% endif %}
+      {% if provider == 'google_calendar' %}
+      <form method="get" action="/google/oauth/start" class="actions">
+        <input type="hidden" name="tenant" value="{{ tenant.slug }}" />
+        <button type="submit" class="secondary">
+          {% if summary.status == 'active' %}Reconnect Google Calendar{% else %}Connect Google Calendar{% endif %}
+        </button>
+      </form>
+      <p class="muted">Uses the platform Google OAuth app and stores the refresh token in this tenant integration.</p>
+      {% endif %}
       <form method="post" action="/admin/tenants/{{ tenant.slug }}/integrations/{{ provider }}" class="stack">
         <div>
           <label>Status</label>

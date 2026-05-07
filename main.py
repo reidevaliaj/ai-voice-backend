@@ -26,6 +26,7 @@ from outgoing_db import init_outgoing_db
 from routes.admin import router as admin_router
 from routes.agent import router as agent_router
 from routes.events import router as events_router
+from routes.google_oauth import router as google_oauth_router
 from routes.outgoing import router as outgoing_router
 from routes.tools_email import router as email_router
 from routes.zoom_oauth import router as zoom_oauth_router
@@ -48,6 +49,7 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET_KEY, same_site="
 
 app.include_router(email_router)
 app.include_router(events_router)
+app.include_router(google_oauth_router)
 app.include_router(zoom_oauth_router)
 app.include_router(agent_router)
 app.include_router(admin_router)

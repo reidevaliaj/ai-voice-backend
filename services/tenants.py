@@ -92,6 +92,11 @@ SUPPORTED_STT_LANGUAGES: tuple[tuple[str, str], ...] = (
 SUPPORTED_STT_LANGUAGE_MAP = {code: label for code, label in SUPPORTED_STT_LANGUAGES}
 DEFAULT_INTERRUPTION_MIN_WORDS = 3
 DEFAULT_INCOMING_BRIDGE_FILLER_ENABLED = False
+SUPPORTED_INCOMING_RUNTIME_MODES: tuple[tuple[str, str], ...] = (
+    ("standard", "Standard Pipeline"),
+    ("openai_realtime_test", "OpenAI Realtime Test"),
+)
+SUPPORTED_INCOMING_RUNTIME_MODE_MAP = {code: label for code, label in SUPPORTED_INCOMING_RUNTIME_MODES}
 
 
 def normalize_assistant_language(value: str | None) -> str:
@@ -120,6 +125,17 @@ def normalize_stt_language(value: str | None, assistant_language: str | None = N
 
 def supported_stt_languages() -> list[dict[str, str]]:
     return [{"code": code, "label": label} for code, label in SUPPORTED_STT_LANGUAGES]
+
+
+def normalize_incoming_runtime_mode(value: str | None) -> str:
+    candidate = (value or "standard").strip().lower()
+    if candidate in SUPPORTED_INCOMING_RUNTIME_MODE_MAP:
+        return candidate
+    return "standard"
+
+
+def supported_incoming_runtime_modes() -> list[dict[str, str]]:
+    return [{"code": code, "label": label} for code, label in SUPPORTED_INCOMING_RUNTIME_MODES]
 
 
 def normalize_endpointing_delay(value: Any, *, default: float, min_value: float = 0.1, max_value: float = 6.0) -> float:
@@ -203,6 +219,7 @@ def default_config_payload(display_name: str = "Code Studio") -> dict[str, Any]:
             "cartesia_voice_source": "platform_default" if not CARTESIA_API_KEY else "cartesia_api",
             "interruption_min_words": DEFAULT_INTERRUPTION_MIN_WORDS,
             "incoming_bridge_filler_enabled": DEFAULT_INCOMING_BRIDGE_FILLER_ENABLED,
+            "incoming_runtime_mode": "standard",
             "call_types": [
                 "sales_lead",
                 "support_issue",
@@ -491,6 +508,9 @@ def build_runtime_context(session: Session, tenant: Tenant, config_version: int 
                     DEFAULT_INCOMING_BRIDGE_FILLER_ENABLED,
                 )
             ),
+            "incoming_runtime_mode": normalize_incoming_runtime_mode(
+                (config.extra_settings or {}).get("incoming_runtime_mode")
+            ),
         },
         "integrations": integrations,
     }
@@ -646,6 +666,9 @@ def config_form_payload(config: TenantAgentConfig | None) -> dict[str, Any]:
                 DEFAULT_INCOMING_BRIDGE_FILLER_ENABLED,
             )
         )
+        payload["incoming_runtime_mode"] = normalize_incoming_runtime_mode(
+            (payload.get("extra_settings") or {}).get("incoming_runtime_mode")
+        )
         return payload
     min_endpointing_delay, max_endpointing_delay = normalize_endpointing_window(
         config.min_endpointing_delay,
@@ -672,6 +695,9 @@ def config_form_payload(config: TenantAgentConfig | None) -> dict[str, Any]:
         "interruption_min_words": normalize_interruption_min_words((config.extra_settings or {}).get("interruption_min_words")),
         "incoming_bridge_filler_enabled": bool(
             (config.extra_settings or {}).get("incoming_bridge_filler_enabled", DEFAULT_INCOMING_BRIDGE_FILLER_ENABLED)
+        ),
+        "incoming_runtime_mode": normalize_incoming_runtime_mode(
+            (config.extra_settings or {}).get("incoming_runtime_mode")
         ),
         "tts_voice": config.tts_voice,
         "tts_speed": normalize_tts_speed(config.tts_speed),

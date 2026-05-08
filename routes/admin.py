@@ -100,11 +100,13 @@ from services.tenants import (
     normalize_assistant_language,
     normalize_endpointing_window,
     normalize_interruption_min_words,
+    normalize_incoming_runtime_mode,
     normalize_phone_number,
     normalize_stt_language,
     normalize_tts_speed,
     parse_lines,
     supported_assistant_languages,
+    supported_incoming_runtime_modes,
     supported_stt_languages,
     upsert_integration,
     upsert_phone_number,
@@ -575,6 +577,7 @@ async def tenant_detail(slug: str, request: Request, db: Session = Depends(get_d
             "recent_email_events": _latest_email_events(tenant_id=tenant.id),
             "runtime": runtime,
             "language_choices": supported_assistant_languages(),
+            "incoming_runtime_mode_choices": supported_incoming_runtime_modes(),
             "stt_language_choices": supported_stt_languages(),
             "cartesia_voice_options": voice_options,
             "cartesia_voice_error": voice_error,
@@ -1113,6 +1116,7 @@ async def update_tenant_config(slug: str, request: Request, db: Session = Depend
     extra_settings = dict(extra_settings or {})
     extra_settings["interruption_min_words"] = normalize_interruption_min_words(form.get("interruption_min_words"), default=3)
     extra_settings["incoming_bridge_filler_enabled"] = form.get("incoming_bridge_filler_enabled") == "on"
+    extra_settings["incoming_runtime_mode"] = normalize_incoming_runtime_mode(str(form.get("incoming_runtime_mode") or "standard"))
 
     payload = {
         "business_name": str(form.get("business_name") or tenant.display_name).strip(),

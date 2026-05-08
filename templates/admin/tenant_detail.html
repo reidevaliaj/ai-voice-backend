@@ -99,6 +99,15 @@
         </div>
         <p class="muted">Incoming only. When enabled, the assistant can say a short filler phrase during the response bridge.</p>
       </div>
+      <div>
+        <label>Incoming Runtime Mode</label>
+        <select name="incoming_runtime_mode">
+          {% for item in incoming_runtime_mode_choices %}
+          <option value="{{ item.code }}" {% if item.code == config_form.incoming_runtime_mode %}selected{% endif %}>{{ item.label }}</option>
+          {% endfor %}
+        </select>
+        <p class="muted">Use Standard for the current pipeline. OpenAI Realtime Test is an incoming-only experiment for lower-latency voice interaction.</p>
+      </div>
     </div>
     <div>
       <label>Greeting</label>

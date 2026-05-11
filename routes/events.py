@@ -62,7 +62,7 @@ class ValidateCallEndPayload(BaseModel):
 class CheckAvailabilityReq(BaseModel):
     tenant_id: str = "default"
     duration_minutes: int = 30
-    max_slots: int = 200
+    max_slots: int = 3
 
 
 class CheckMeetingSlotReq(BaseModel):
@@ -292,7 +292,6 @@ def _run_meeting_creation(db: Session, payload: TranscriptPayload, analysis: Dic
             end_iso=str(record["meeting_end_iso"]),
             attendees=attendees,
             context=calendar_ctx,
-            horizon_days=int(config["booking_horizon_days"]),
         )
         record["calendar_result"] = create_resp
         if not create_resp.get("created"):
@@ -423,17 +422,15 @@ async def check_availability(req: CheckAvailabilityReq, db: Session = Depends(ge
     try:
         result = get_free_slots_next_two_weeks(
             duration_minutes=req.duration_minutes,
-            max_slots=req.max_slots,
+            max_slots=min(max(req.max_slots, 1), 3),
             context=calendar_ctx,
-            horizon_days=int(runtime["config"]["booking_horizon_days"]),
         )
         return {"ok": True, **result}
     except Exception as exc:
         fallback = get_fallback_slots_next_two_weeks(
             duration_minutes=req.duration_minutes,
-            max_slots=req.max_slots,
+            max_slots=min(max(req.max_slots, 1), 3),
             context=calendar_ctx,
-            horizon_days=int(runtime["config"]["booking_horizon_days"]),
         )
         return {"ok": True, "degraded": True, "degraded_reason": str(exc), **fallback}
 
@@ -448,7 +445,6 @@ async def check_meeting_slot_route(req: CheckMeetingSlotReq, db: Session = Depen
             duration_minutes=req.duration_minutes,
             alternatives_limit=req.alternatives_limit,
             context=calendar_ctx,
-            horizon_days=int(runtime["config"]["booking_horizon_days"]),
         )
         return {"ok": True, **result}
     except Exception as exc:
@@ -457,6 +453,7 @@ async def check_meeting_slot_route(req: CheckMeetingSlotReq, db: Session = Depen
             "status": "unavailable",
             "degraded": True,
             "degraded_reason": str(exc),
+            "next_slot": None,
             "next_slots": [],
             "day_blocks": [],
             "timezone": runtime["config"]["timezone"],

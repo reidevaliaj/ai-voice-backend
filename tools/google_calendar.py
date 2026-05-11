@@ -10,6 +10,7 @@ from app_config import DEFAULT_BUSINESS_DAYS, DEFAULT_BUSINESS_HOURS, DEFAULT_BU
 
 logger = logging.getLogger("google_calendar")
 BUSINESS_TIMEZONE = DEFAULT_BUSINESS_TIMEZONE
+CALENDAR_SLOT_LOOKAHEAD_DAYS = 30
 
 
 class CalendarContext:
@@ -178,7 +179,6 @@ def _next_available_slots(
     busy: List[Tuple[datetime, datetime]],
     duration_minutes: int,
     limit: int,
-    horizon_days: int,
 ) -> List[Dict[str, str]]:
     if duration_minutes <= 0:
         duration_minutes = 30
@@ -186,7 +186,7 @@ def _next_available_slots(
         limit = 3
 
     now = datetime.now(timezone.utc)
-    horizon_end = now + timedelta(days=horizon_days)
+    horizon_end = now + timedelta(days=CALENDAR_SLOT_LOOKAHEAD_DAYS)
     tz = ZoneInfo(ctx.business_timezone)
     slots: List[Dict[str, str]] = []
     cursor_day = search_start.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -244,13 +244,12 @@ def _build_day_blocks(ctx: CalendarContext, slots: List[Dict[str, str]], max_day
 
 def get_free_slots_next_two_weeks(
     duration_minutes: int = 30,
-    max_slots: int = 10,
+    max_slots: int = 3,
     context: CalendarContext | None = None,
-    horizon_days: int = 14,
 ) -> Dict[str, Any]:
     ctx = context or DEFAULT_CONTEXT
     now = datetime.now(timezone.utc)
-    end = now + timedelta(days=horizon_days)
+    end = now + timedelta(days=CALENDAR_SLOT_LOOKAHEAD_DAYS)
     busy = get_busy_blocks(ctx, now, end)
     allowed_days = _allowed_business_days(ctx)
     tz = ZoneInfo(ctx.business_timezone)
@@ -296,20 +295,20 @@ def get_free_slots_next_two_weeks(
     return {
         "timezone": ctx.business_timezone,
         "duration_minutes": duration_minutes,
-        "horizon_days": horizon_days,
+        "next_slot": slots[0] if slots else None,
+        "next_slots": slots,
         "slots": slots,
     }
 
 
 def get_fallback_slots_next_two_weeks(
     duration_minutes: int = 30,
-    max_slots: int = 10,
+    max_slots: int = 3,
     context: CalendarContext | None = None,
-    horizon_days: int = 14,
 ) -> Dict[str, Any]:
     ctx = context or DEFAULT_CONTEXT
     now = datetime.now(timezone.utc)
-    end = now + timedelta(days=horizon_days)
+    end = now + timedelta(days=CALENDAR_SLOT_LOOKAHEAD_DAYS)
     allowed_days = _allowed_business_days(ctx)
     tz = ZoneInfo(ctx.business_timezone)
     slots: List[Dict[str, str]] = []
@@ -332,7 +331,8 @@ def get_fallback_slots_next_two_weeks(
     return {
         "timezone": ctx.business_timezone,
         "duration_minutes": duration_minutes,
-        "horizon_days": horizon_days,
+        "next_slot": slots[0] if slots else None,
+        "next_slots": slots,
         "slots": slots,
         "fallback": True,
     }
@@ -343,28 +343,19 @@ def check_meeting_slot(
     duration_minutes: int = 30,
     alternatives_limit: int = 3,
     context: CalendarContext | None = None,
-    horizon_days: int = 14,
 ) -> Dict[str, Any]:
     ctx = context or DEFAULT_CONTEXT
     preferred_start = _parse_iso(preferred_start_iso, ctx).astimezone(timezone.utc)
     preferred_end = preferred_start + timedelta(minutes=duration_minutes)
     now = datetime.now(timezone.utc)
-    horizon_end = now + timedelta(days=horizon_days)
+    search_end = now + timedelta(days=CALENDAR_SLOT_LOOKAHEAD_DAYS)
 
-    if preferred_start < now or preferred_start > horizon_end:
-        return {
-            "status": "outside_horizon",
-            "timezone": ctx.business_timezone,
-            "duration_minutes": duration_minutes,
-            "next_slots": [],
-            "day_blocks": [],
-        }
-
-    busy = get_busy_blocks(ctx, now, horizon_end)
-    next_slots = _next_available_slots(ctx, preferred_start, busy, duration_minutes, alternatives_limit, horizon_days)
+    busy = get_busy_blocks(ctx, now, search_end)
+    next_slots = _next_available_slots(ctx, max(preferred_start, now), busy, duration_minutes, alternatives_limit)
+    next_slot = next_slots[0] if next_slots else None
     day_blocks = _build_day_blocks(ctx, next_slots, max_days=5)
 
-    if not _is_within_business_hours(preferred_start, preferred_end, ctx):
+    if preferred_start < now or not _is_within_business_hours(preferred_start, preferred_end, ctx):
         return {
             "status": "outside_hours",
             "timezone": ctx.business_timezone,
@@ -373,6 +364,7 @@ def check_meeting_slot(
                 "start": preferred_start.astimezone(ZoneInfo(ctx.business_timezone)).isoformat(),
                 "end": preferred_end.astimezone(ZoneInfo(ctx.business_timezone)).isoformat(),
             },
+            "next_slot": next_slot,
             "next_slots": next_slots,
             "day_blocks": day_blocks,
         }
@@ -386,6 +378,7 @@ def check_meeting_slot(
                 "start": preferred_start.astimezone(ZoneInfo(ctx.business_timezone)).isoformat(),
                 "end": preferred_end.astimezone(ZoneInfo(ctx.business_timezone)).isoformat(),
             },
+            "next_slot": next_slot,
             "next_slots": next_slots,
             "day_blocks": day_blocks,
         }
@@ -409,16 +402,12 @@ def create_meeting_event(
     attendees: Optional[List[str]] = None,
     meeting_link: str = "",
     context: CalendarContext | None = None,
-    horizon_days: int = 14,
 ) -> Dict[str, Any]:
     ctx = context or DEFAULT_CONTEXT
     start_dt = _parse_iso(start_iso, ctx)
     end_dt = _parse_iso(end_iso, ctx)
-    now = datetime.now(timezone.utc)
     if end_dt <= start_dt:
         raise ValueError("meeting end must be after meeting start")
-    if start_dt > now + timedelta(days=horizon_days):
-        return {"created": False, "reason": "outside_horizon"}
 
     if ctx.enforce_busy_recheck:
         busy = get_busy_blocks(ctx, start_dt, end_dt)

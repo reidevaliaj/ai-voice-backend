@@ -74,7 +74,6 @@ class TenantAgentConfig(Base):
     business_hours: Mapped[str] = mapped_column(String(50), default="09:00-17:00", nullable=False)
     business_days: Mapped[str] = mapped_column(String(50), default="1,2,3,4,5", nullable=False)
     meeting_duration_minutes: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
-    booking_horizon_days: Mapped[int] = mapped_column(Integer, default=14, nullable=False)
     enabled_tools: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     llm_model: Mapped[str] = mapped_column(String(100), default="gpt-4.1-mini", nullable=False)
     min_endpointing_delay: Mapped[float] = mapped_column(default=0.3, nullable=False)

@@ -1130,7 +1130,6 @@ async def update_tenant_config(slug: str, request: Request, db: Session = Depend
         "business_hours": str(form.get("business_hours") or "09:00-17:00").strip(),
         "business_days": str(form.get("business_days") or "1,2,3,4,5").strip(),
         "meeting_duration_minutes": int(str(form.get("meeting_duration_minutes") or 30).strip() or 30),
-        "booking_horizon_days": int(str(form.get("booking_horizon_days") or 14).strip() or 14),
         "enabled_tools": enabled_tools,
         "llm_model": str(form.get("llm_model") or "gpt-4.1-mini").strip(),
         "stt_language": "",

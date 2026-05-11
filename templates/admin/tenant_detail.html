@@ -116,7 +116,7 @@
     <div>
       <label>Tenant Base Prompt</label>
       <textarea name="tenant_prompt" required>{{ config_form.tenant_prompt }}</textarea>
-      <p class="muted">This is the required tenant-specific receptionist prompt. It defines the client-specific behavior while platform safety rules still stay shared.</p>
+      <p class="muted">This is the required tenant-specific receptionist prompt. Use it for the client-specific conversation behavior.</p>
     </div>
     <div>
       <label>Services (one per line)</label>
@@ -127,8 +127,18 @@
       <textarea name="faq_notes">{{ config_form.faq_notes }}</textarea>
     </div>
     <div>
-      <label>Optional Prompt Appendix</label>
+      <label>Rules</label>
       <textarea name="prompt_appendix">{{ config_form.prompt_appendix }}</textarea>
+      <p class="muted">These rules are sent before the tenant base prompt, so they have higher priority for this tenant. They are editable per tenant and start with the default rules.</p>
+    </div>
+    <div>
+      <label>Available Agent Tools</label>
+      <textarea readonly>check_meeting_slot(preferred_start_iso, duration_minutes)
+- Checks whether the requested meeting slot is available and can return the next available slot.
+
+call_end(call_type, name, company, contact_email, contact_phone, topic, notes, urgency, preferred_time_window)
+- Ends the call after the assistant finishes speaking and saves the call-end event.</textarea>
+      <p class="muted">You can reference these exact tool names inside the rules or the tenant base prompt.</p>
     </div>
     <div class="row">
       <div>

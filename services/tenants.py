@@ -96,6 +96,21 @@ SUPPORTED_INCOMING_RUNTIME_MODES: tuple[tuple[str, str], ...] = (
     ("openai_realtime_test", "OpenAI Realtime Test"),
 )
 SUPPORTED_INCOMING_RUNTIME_MODE_MAP = {code: label for code, label in SUPPORTED_INCOMING_RUNTIME_MODES}
+DEFAULT_TENANT_RULES = """
+Rules:
+- Speak in a warm, business-professional tone.
+- Keep responses short and phone-friendly.
+- If something in the sentence you receive does not make sense or seems not correct, ask again kindly.
+- Never offer prices or promise timelines unless the tenant context explicitly says to.
+- Ask only the next needed question.
+- Use check_meeting_slot before confirming any meeting.
+- Only say a meeting is booked or confirmed when check_meeting_slot returns that the slot is available.
+- If check_meeting_slot says the slot is unavailable, busy, outside hours, or live calendar access is unavailable, clearly say the meeting is not booked yet.
+- Never invent availability or time slots.
+- If the caller says there is nothing else they need, or says goodbye or thanks after the conversation is complete, call call_end immediately.
+- If you have enough information, ask if the caller needs anything else. If not, end politely and call call_end.
+- For unrelated or persistent vendor calls, politely decline and end the call if they continue.
+""".strip()
 
 
 def normalize_assistant_language(value: str | None) -> str:
@@ -124,6 +139,11 @@ def normalize_stt_language(value: str | None, assistant_language: str | None = N
 
 def supported_stt_languages() -> list[dict[str, str]]:
     return [{"code": code, "label": label} for code, label in SUPPORTED_STT_LANGUAGES]
+
+
+def normalize_rules_text(value: str | None) -> str:
+    text = str(value or "").strip()
+    return text or DEFAULT_TENANT_RULES
 
 
 def normalize_incoming_runtime_mode(value: str | None) -> str:
@@ -197,7 +217,7 @@ def default_config_payload(display_name: str = "Code Studio") -> dict[str, Any]:
             "SEO",
         ],
         "faq_notes": "",
-        "prompt_appendix": "",
+        "prompt_appendix": DEFAULT_TENANT_RULES,
         "business_hours": DEFAULT_BUSINESS_HOURS,
         "business_days": DEFAULT_BUSINESS_DAYS,
         "meeting_duration_minutes": DEFAULT_MEETING_DURATION_MINUTES,
@@ -353,7 +373,7 @@ def create_config_version(session: Session, tenant: Tenant, payload: dict[str, A
         tenant_prompt=str(payload.get("tenant_prompt") or default_tenant_prompt(tenant.display_name)).strip(),
         services=parse_lines(payload.get("services")),
         faq_notes=str(payload.get("faq_notes") or ""),
-        prompt_appendix=str(payload.get("prompt_appendix") or ""),
+        prompt_appendix=normalize_rules_text(str(payload.get("prompt_appendix") or "")),
         business_hours=str(payload.get("business_hours") or DEFAULT_BUSINESS_HOURS),
         business_days=str(payload.get("business_days") or DEFAULT_BUSINESS_DAYS),
         meeting_duration_minutes=int(payload.get("meeting_duration_minutes") or DEFAULT_MEETING_DURATION_MINUTES),
@@ -479,7 +499,7 @@ def build_runtime_context(session: Session, tenant: Tenant, config_version: int 
             "tenant_prompt": config.tenant_prompt,
             "services": list(config.services or []),
             "faq_notes": config.faq_notes,
-            "prompt_appendix": config.prompt_appendix,
+            "prompt_appendix": normalize_rules_text(config.prompt_appendix),
             "business_hours": config.business_hours,
             "business_days": config.business_days,
             "meeting_duration_minutes": config.meeting_duration_minutes,
@@ -679,7 +699,7 @@ def config_form_payload(config: TenantAgentConfig | None) -> dict[str, Any]:
         "tenant_prompt": config.tenant_prompt,
         "services": "\n".join(config.services or []),
         "faq_notes": config.faq_notes,
-        "prompt_appendix": config.prompt_appendix,
+        "prompt_appendix": normalize_rules_text(config.prompt_appendix),
         "business_hours": config.business_hours,
         "business_days": config.business_days,
         "meeting_duration_minutes": config.meeting_duration_minutes,
